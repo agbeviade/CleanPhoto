@@ -151,7 +151,9 @@ class RestoreService:
                         src_bytes, prompt=prompt, model=flux_model,
                     )
                 except Exception as exc:
-                    log.exception("Flux failed -> fallback pipeline: %s", exc)
+                    # Log court (warning) + log complet (error) pour diagnostic
+                    log.error("Flux failed (%s) -> fallback pipeline. Full: %r",
+                              type(exc).__name__, exc)
             # 2) Pipeline multi-modeles (BOPBTL + DDColor + CodeFormer)
             if self.use_pipeline and self._pipeline.is_configured:
                 try:

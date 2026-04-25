@@ -50,19 +50,32 @@ PREMIUM_MODEL = os.getenv(
 )
 
 # Prompt hardcode applique automatiquement a chaque restauration.
-# Inspire des resultats BGMaster + cahier des charges utilisateur.
+# Override possible via env FLUX_RESTORE_PROMPT.
 DEFAULT_PROMPT = (
-    "Restore this damaged old photograph to its original condition. "
-    "Remove all scratches, tears, folds, dust spots, stains, and creases "
-    "completely. Remove any artificial hand-painted coloring from the "
-    "original (such as greenish or yellowish tints applied by hand). "
-    "Recreate natural realistic colors appropriate to the historical era: "
-    "warm lifelike skin tones, fabrics in their original natural shades, "
-    "neutral studio backgrounds. Reconstruct faces in high definition "
-    "while strictly preserving the original identity, age, gender, "
-    "ethnicity, and facial expression of every person. Keep the exact "
-    "composition, poses, framing, and clothing as in the source image. "
-    "Sharp, photorealistic, high resolution, no artistic stylization."
+    "Act as an expert digital conservator and high-end photo restoration "
+    "specialist. Your goal is to transform a degraded, old, or low-resolution "
+    "photograph into a pristine high-definition version while maintaining "
+    "100% of its historical authenticity. "
+    "DAMAGE REPAIR: Systematically identify and surgically remove physical "
+    "artifacts including deep scratches, creases, cracks, dust, water stains, "
+    "and excessive film grain. Use advanced in-painting to reconstruct "
+    "missing areas seamlessly based on the surrounding context. "
+    "DEEP FACE RESTORATION: Apply high-precision reconstruction to all human "
+    "faces. Enhance the clarity of eyes, teeth, and skin structure. Eliminate "
+    "motion blur and digital noise. CRITICAL: Scrupulously preserve the "
+    "subject's original identity, unique features, and emotional expression "
+    "to avoid a 'generic' or 'plastic' AI appearance. "
+    "TEXTURE RECOVERY: Restore the organic texture of skin, hair, and fabric. "
+    "Enhance micro-contrast to bring back fine details lost to time or poor "
+    "scanning. "
+    "COLOR & LIGHTING: If the image is monochrome or sepia, apply a realistic, "
+    "subtle, and historically accurate colorization based on object recognition "
+    "(skin tones, sky, foliage, textiles). If the image is faded color, "
+    "perform a full color balance restoration to correct yellowing and aging. "
+    "FINAL MASTERING: Execute a 4K upscaling process. The final output must "
+    "be sharp, professional, and photorealistic, appearing as if it were "
+    "captured with a modern high-quality camera while retaining its original "
+    "soul."
 )
 
 
@@ -132,11 +145,14 @@ class FluxKontextProvider:
                 "aspect_ratio": "match_input_image",
             }
         }
-        log.info("flux: POST %s (prompt=%dch)", chosen_model,
-                 len(payload["input"]["prompt"]))
+        prompt_len = len(payload["input"]["prompt"])
+        log.info("flux: POST %s (prompt=%dch)", chosen_model, prompt_len)
         r = requests.post(url, headers=headers, json=payload, timeout=timeout)
         if r.status_code >= 400:
-            raise RuntimeError(f"Flux API error {r.status_code}: {r.text[:300]}")
+            log.error("flux: HTTP %d body=%s prompt_len=%d",
+                      r.status_code, r.text[:800], prompt_len)
+            raise RuntimeError(
+                f"Flux API error {r.status_code}: {r.text[:500]}")
 
         data = r.json()
         status = data.get("status")
