@@ -19,6 +19,7 @@ import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from .replicate_provider import ReplicateProvider
+from .openai_provider import OpenAIProvider
 
 log = logging.getLogger("souvenir.restore")
 
@@ -40,28 +41,34 @@ class RestoreService:
         self._codeformer = None
         self._upsampler = None
         self._replicate = ReplicateProvider.from_env()
+        self._openai = OpenAIProvider.from_env()
 
         # Auto-detect (priorite: replicate > advanced > basic > lite)
         if forced == "lite":
             self.mode = "lite"
         elif forced == "basic" and HAS_CV2:
             self.mode = "basic"
+        elif forced == "openai" and self._openai.is_configured:
+            self.mode = "openai"
         elif forced == "replicate" and self._replicate.is_configured:
             self.mode = "replicate"
         elif forced == "advanced":
             self.mode = "advanced" if self._can_load_advanced() else "basic" if HAS_CV2 else "lite"
         else:
-            # Auto: privilegier replicate si token configure (effet wow + sans GPU local)
+            # Auto: replicate par defaut (rapide + economique)
             if self._replicate.is_configured:
                 self.mode = "replicate"
+            elif self._openai.is_configured:
+                self.mode = "openai"
             elif self._can_load_advanced():
                 self.mode = "advanced"
             elif HAS_CV2:
                 self.mode = "basic"
             else:
                 self.mode = "lite"
-        log.info("Pipeline mode: %s (cv2=%s, replicate=%s)",
-                 self.mode, HAS_CV2, self._replicate.is_configured)
+        log.info("Pipeline mode: %s (cv2=%s, replicate=%s, openai=%s)",
+                 self.mode, HAS_CV2,
+                 self._replicate.is_configured, self._openai.is_configured)
 
     def _can_load_advanced(self) -> bool:
         if not (CODEFORMER_PATH.exists() and REALESRGAN_PATH.exists()):
@@ -79,6 +86,7 @@ class RestoreService:
             "mode": self.mode,
             "cv2_available": HAS_CV2,
             "replicate_configured": self._replicate.is_configured,
+            "openai_configured": self._openai.is_configured,
             "codeformer_weights": CODEFORMER_PATH.exists(),
             "realesrgan_weights": REALESRGAN_PATH.exists(),
         }
@@ -91,14 +99,34 @@ class RestoreService:
         src_bytes: bytes,
         fidelity: Optional[float] = None,
         upscale: Optional[int] = None,
+        provider: Optional[str] = None,
+        prompt: Optional[str] = None,
+        quality: Optional[str] = None,
     ) -> bytes:
         """Restaure depuis bytes -> bytes (JPEG). Compatible serverless.
 
-        fidelity (0.0-1.0) et upscale (1-4) sont optionnels et applicables au
-        mode replicate. Cascade de fallback en cas d'echec:
-          replicate -> advanced (local GPU) -> basic (cv2) -> lite (Pillow)
+        Args:
+          provider: 'replicate' ou 'openai' pour forcer un provider precis.
+                    Si None, utilise self.mode (auto-selectionne).
+          fidelity / upscale : params Replicate (CodeFormer)
+          prompt / quality : params OpenAI (gpt-image-1)
+
+        Cascade de fallback :
+          requested -> replicate -> openai -> advanced -> basic -> lite
         """
-        if self.mode == "replicate":
+        # 1. Provider explicite via parametre requete
+        chosen = (provider or self.mode).lower()
+
+        if chosen == "openai" and self._openai.is_configured:
+            try:
+                return self._openai.restore_bytes(
+                    src_bytes, prompt=prompt, quality=quality,
+                )
+            except Exception as exc:
+                log.exception("OpenAI failed -> fallback replicate: %s", exc)
+                chosen = "replicate"
+
+        if chosen == "replicate" and self._replicate.is_configured:
             try:
                 return self._replicate.restore_bytes(
                     src_bytes, fidelity=fidelity, upscale=upscale,

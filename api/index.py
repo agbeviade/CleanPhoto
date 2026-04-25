@@ -139,6 +139,9 @@ async def restore(
     file: UploadFile = File(...),
     fidelity: Optional[float] = Form(None),
     upscale: Optional[int] = Form(None),
+    provider: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
+    quality: Optional[str] = Form(None),
 ):
     """Restaure une photo. Retourne JSON {status, restored_image_url, ...}.
 
@@ -175,10 +178,20 @@ async def restore(
     log.info("Job %s : %d KB, ext=%s, device=%s, premium=%s",
              job_id, len(src_bytes) // 1024, ext, device_id, is_premium)
 
+    # Provider OpenAI gpt-image-1 reserve aux Premium (cout x10)
+    effective_provider = provider
+    if effective_provider == "openai" and not is_premium:
+        effective_provider = None  # downgrade -> mode auto (replicate)
+
     t0 = time.time()
     try:
         restored_bytes = restore_service.restore_bytes(
-            src_bytes, fidelity=fidelity, upscale=upscale,
+            src_bytes,
+            fidelity=fidelity,
+            upscale=upscale,
+            provider=effective_provider,
+            prompt=prompt,
+            quality=quality,
         )
     except Exception as exc:
         log.exception("Restoration failed")
