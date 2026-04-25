@@ -12,15 +12,6 @@
     { "src": "/health", "dest": "api/index.py" },
     { "src": "/restore", "dest": "api/index.py" },
     { "src": "/restore-binary", "dest": "api/index.py" },
-    { "src": "/", "dest": "api/index.py" }
-  ],
-  "env": {
-    "PIPELINE_MODE": "replicate",
-    "MAX_UPLOAD_MB": "10"
-  },
-  "functions": {
-    "api/index.py": {
-      "maxDuration": 60
-    }
-  }
+    { "src": "/(.*)", "dest": "api/index.py" }
+  ]
 }
