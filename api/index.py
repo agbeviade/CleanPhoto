@@ -58,6 +58,8 @@ geniuspay = GeniusPayClient.from_env()
 PREMIUM_PRICE_XOF = int(os.getenv("PREMIUM_PRICE_XOF", "2999"))
 PREMIUM_PLAN = os.getenv("PREMIUM_PLAN", "monthly")  # monthly | lifetime
 PREMIUM_DURATION_DAYS = int(os.getenv("PREMIUM_DURATION_DAYS", "30"))
+# Rate-limit anti-spam sur /api/payments/create
+PAYMENTS_RATE_LIMIT_PER_10MIN = int(os.getenv("PAYMENTS_RATE_LIMIT_PER_10MIN", "5"))
 
 
 def _device_id(request: Request) -> Optional[str]:
@@ -226,6 +228,31 @@ async def payments_create(request: Request):
         raise HTTPException(status_code=400,
                             detail="X-Device-Id ou Authorization requis")
 
+    # Rate-limit anti-spam : max N paiements pending par device/user en 10 min.
+    # Empeche un attaquant de creer 1000 transactions GeniusPay par seconde
+    # (qui pourrait soit spammer GeniusPay soit polluer notre table payments).
+    try:
+        recent_count = supabase.count_recent_payments(
+            device_id=device_id, user_id=user_id, minutes=10,
+        )
+        if recent_count >= PAYMENTS_RATE_LIMIT_PER_10MIN:
+            log.warning(
+                "rate-limit /payments/create atteint device=%s user=%s count=%d",
+                device_id, user_id, recent_count,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Trop de tentatives de paiement. Reessayez dans quelques "
+                    "minutes ou finalisez un paiement deja en attente."
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Si Supabase est down, on log mais on laisse passer (degraded mode)
+        log.warning("rate-limit check failed (degraded): %s", exc)
+
     try:
         body = await request.json()
     except Exception:
@@ -366,15 +393,39 @@ async def payments_webhook(request: Request):
         or (data.get("status") in ("completed", "success"))
     )
     if is_success:
+        # SECURITE CRITIQUE : verifier que le montant recu == montant attendu.
+        # Empeche un attaquant qui connaitrait le whsec de forger un webhook
+        # avec amount=1 pour activer premium gratuitement.
+        if not existing:
+            log.error("webhook success pour reference inconnue: %s", reference)
+            raise HTTPException(status_code=404, detail="reference inconnue")
+
+        expected_amount = existing.get("amount")
+        try:
+            received_amount = int(float(data.get("amount") or 0))
+        except (ValueError, TypeError):
+            received_amount = 0
+        if expected_amount and received_amount != expected_amount:
+            log.error(
+                "webhook MONTANT INVALIDE ref=%s expected=%s received=%s - REFUSE",
+                reference, expected_amount, received_amount,
+            )
+            supabase.update_payment_status(
+                reference=reference, status="suspicious", raw_webhook=payload,
+            )
+            raise HTTPException(status_code=400, detail="Montant invalide")
+
         # Recupere le contexte (device_id / user_id / plan) depuis notre row pending
-        device_id = (existing or {}).get("device_id")
-        user_id = (existing or {}).get("user_id")
-        plan = (existing or {}).get("plan") or PREMIUM_PLAN
-        # Fallback : metadata GeniusPay (au cas ou la row n'existe pas)
-        meta = data.get("metadata") or {}
-        device_id = device_id or meta.get("device_id") or None
-        user_id = user_id or meta.get("user_id") or None
-        plan = plan or meta.get("plan") or PREMIUM_PLAN
+        device_id = existing.get("device_id")
+        user_id = existing.get("user_id")
+        plan = existing.get("plan") or PREMIUM_PLAN
+        # Fallback metadata GeniusPay UNIQUEMENT si la row pending est incomplete
+        # (ne pas faire confiance au webhook pour le device/user, c'est notre row
+        # initiale qui est la source de verite)
+        if not device_id and not user_id:
+            meta = data.get("metadata") or {}
+            device_id = meta.get("device_id") or None
+            user_id = meta.get("user_id") or None
 
         # Calcul expires_at
         expires_at = None

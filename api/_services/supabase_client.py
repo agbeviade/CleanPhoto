@@ -288,6 +288,38 @@ class SupabaseClient:
             log.warning("update_payment_status failed: %s", exc)
             return False
 
+    def count_recent_payments(
+        self,
+        device_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        minutes: int = 10,
+    ) -> int:
+        """Compte les paiements crees dans les N dernieres minutes pour un device/user.
+
+        Utilise pour rate-limiter /api/payments/create (anti-spam).
+        """
+        if not self._client:
+            return 0
+        if not device_id and not user_id:
+            return 0
+        try:
+            from datetime import datetime, timedelta, timezone
+            since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+            q = (
+                self._client.table("payments")
+                .select("id", count="exact")
+                .gte("created_at", since)
+            )
+            if user_id:
+                q = q.eq("user_id", user_id)
+            elif device_id:
+                q = q.eq("device_id", device_id)
+            res = q.execute()
+            return res.count or 0
+        except Exception as exc:
+            log.warning("count_recent_payments failed: %s", exc)
+            return 0
+
     def get_global_count_24h(self) -> int:
         """Compte total des restaurations sur les 24 dernieres heures (cap global anti-abus)."""
         if not self._client:
