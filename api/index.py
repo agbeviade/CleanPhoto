@@ -56,11 +56,6 @@ def _device_id(request: Request) -> Optional[str]:
     return request.headers.get("X-Device-Id") or request.headers.get("x-device-id")
 
 
-def _is_premium(request: Request) -> bool:
-    # Hook futur: valider via RevenueCat / Stripe / Supabase Auth claim
-    return request.headers.get("X-Premium", "0") == "1"
-
-
 def _user_id(request: Request) -> Optional[str]:
     """Extrait le user_id Supabase depuis le header Authorization: Bearer <jwt>."""
     auth = request.headers.get("Authorization") or request.headers.get("authorization")
@@ -68,6 +63,32 @@ def _user_id(request: Request) -> Optional[str]:
         return None
     token = auth.split(" ", 1)[1].strip()
     return auth_service.user_id_from_token(token)
+
+
+# Header X-Premium accepte UNIQUEMENT en mode dev (gated par env)
+# En prod, le statut premium vient EXCLUSIVEMENT de la table subscriptions.
+DEV_ALLOW_PREMIUM_HEADER = os.getenv("DEV_ALLOW_PREMIUM_HEADER", "0") == "1"
+
+
+def _is_premium(request: Request, user_id: Optional[str] = None) -> bool:
+    """Determine si l'utilisateur est premium.
+
+    Priorite :
+      1. Si user_id (authentifie) : lit la table subscriptions cote Supabase
+         (source de verite, anti-bypass).
+      2. Si DEV_ALLOW_PREMIUM_HEADER=1 : accepte le header X-Premium=1
+         (mode dev / tests locaux uniquement).
+      3. Sinon : false (utilisateurs anonymes ne peuvent pas etre premium).
+    """
+    if user_id and supabase.is_configured:
+        return supabase.get_premium_status(user_id)
+    if DEV_ALLOW_PREMIUM_HEADER:
+        return request.headers.get("X-Premium", "0") == "1"
+    return False
+
+
+# Cap global quotidien anti-abus (toutes restaurations confondues, 24h glissant)
+DAILY_GLOBAL_LIMIT = int(os.getenv("DAILY_GLOBAL_LIMIT", "0"))  # 0 = desactive
 
 
 @app.get("/")
@@ -93,10 +114,13 @@ def health():
 
 @app.get("/api/quota")
 def quota(request: Request):
-    """Retourne le quota restant pour le device courant."""
+    """Retourne le quota restant pour l'utilisateur (user_id si auth, sinon device)."""
     device_id = _device_id(request)
-    is_premium = _is_premium(request)
-    allowed, info = quota_service.check(device_id, is_premium)
+    user_id = _user_id(request)
+    is_premium = _is_premium(request, user_id=user_id)
+    allowed, info = quota_service.check(
+        device_id=device_id, is_premium=is_premium, user_id=user_id,
+    )
     return {"allowed": allowed, **info}
 
 
@@ -163,9 +187,33 @@ async def restore(
 
     # --- Quota check ---
     device_id = _device_id(request)
-    is_premium = _is_premium(request)
     user_id = _user_id(request)  # peut etre None si non authentifie
-    allowed, quota_info = quota_service.check(device_id, is_premium)
+    is_premium = _is_premium(request, user_id=user_id)
+
+    # Cap global anti-abus : si DAILY_GLOBAL_LIMIT > 0, on plafonne le total
+    # de restaurations 24h glissantes. Empeche un attaquant de cycler des
+    # device_id pour drainer le credit Replicate.
+    if DAILY_GLOBAL_LIMIT > 0 and not is_premium and supabase.is_configured:
+        try:
+            global_count = supabase.get_global_count_24h()
+            if global_count >= DAILY_GLOBAL_LIMIT:
+                log.warning("DAILY_GLOBAL_LIMIT atteint: %d/%d",
+                            global_count, DAILY_GLOBAL_LIMIT)
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "message": "Service temporairement indisponible (capacite max atteinte). Reessayez dans quelques heures.",
+                        "reason": "daily_global_cap",
+                    },
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.warning("global cap check failed: %s", exc)
+
+    allowed, quota_info = quota_service.check(
+        device_id=device_id, is_premium=is_premium, user_id=user_id,
+    )
     if not allowed:
         raise HTTPException(
             status_code=429,
@@ -218,8 +266,8 @@ async def restore(
         except Exception as exc:
             log.warning("watermark skipped: %s", exc)
 
-    # Enregistrer l'utilisation (memory fallback)
-    quota_service.record(device_id)
+    # Enregistrer l'utilisation (memory fallback ; Supabase logge via log_restoration)
+    quota_service.record(device_id=device_id, user_id=user_id)
 
     # --- Stockage ---
     before_url = after_url = None
@@ -254,7 +302,9 @@ async def restore(
         out_path.write_bytes(restored_bytes)
         # Pas d'URL publique sans storage -> on renvoie le binaire directement
         # Recompute quota AFTER recording
-        _, q_after = quota_service.check(device_id, is_premium)
+        _, q_after = quota_service.check(
+            device_id=device_id, is_premium=is_premium, user_id=user_id,
+        )
         return Response(
             content=restored_bytes,
             media_type="image/jpeg",
@@ -268,7 +318,9 @@ async def restore(
             },
         )
 
-    _, q_after = quota_service.check(device_id, is_premium)
+    _, q_after = quota_service.check(
+        device_id=device_id, is_premium=is_premium, user_id=user_id,
+    )
     return JSONResponse({
         "status": "success",
         "job_id": job_id,

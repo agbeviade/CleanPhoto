@@ -1,14 +1,17 @@
-"""Quota service: limite quotidienne par device_id (anonyme).
+"""Quota service: limite quotidienne, user_id prioritaire.
 
 Strategie:
-  - Identification : header X-Device-Id (UUID genere cote app, persistant)
-  - Limite par defaut: 3 restaurations / 24h glissantes
-  - Override: header X-Premium=1 (futur, apres validation IAP / Stripe)
-  - Stockage: table Supabase `restorations.device_id`
+  - PRIORITE 1: user_id Supabase (depuis JWT) -> quota fiable, anti-bypass
+  - PRIORITE 2: device_id (UUID app) -> fallback pour utilisateurs anonymes
+  - Limite par defaut: 3 restaurations / 24h glissantes (DAILY_FREE_LIMIT env)
+  - Premium = quota illimite (verifie cote serveur via Supabase)
+  - Stockage: table Supabase `restorations` (user_id + device_id)
   - Fallback en memoire si Supabase non configure (dev local)
 
-Architecture future-proof : remplacer le check premium par une
-verification de subscription (RevenueCat / Stripe webhook).
+Securite:
+  - Le quota par user_id est inviolable tant que l'auth Supabase tient.
+  - Le quota par device_id reste contournable (l'app peut regenerer un UUID),
+    mais c'est le mode anonyme : couple avec DAILY_GLOBAL_LIMIT pour cap.
 """
 from __future__ import annotations
 
@@ -30,33 +33,48 @@ class QuotaService:
         # Fallback in-memory (dev / tests)
         self._memory: dict[str, list[float]] = defaultdict(list)
 
-    def _count_recent(self, device_id: str) -> int:
-        """Nombre de restaurations dans les 24h pour ce device."""
-        # Supabase
+    def _count_recent(
+        self,
+        user_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> int:
+        """Compte les restaurations 24h pour user_id (prioritaire) OU device_id."""
+        # Supabase : query par user_id si dispo, sinon device_id
         if self.supabase and self.supabase.is_configured:
             try:
                 from datetime import datetime, timedelta, timezone
                 since = (datetime.now(timezone.utc) - timedelta(seconds=QUOTA_WINDOW_SEC)).isoformat()
                 client = self.supabase._client
-                res = (
-                    client.table("restorations")
-                    .select("id", count="exact")
-                    .eq("device_id", device_id)
-                    .gte("created_at", since)
-                    .execute()
-                )
+                q = client.table("restorations").select("id", count="exact")
+                if user_id:
+                    q = q.eq("user_id", user_id)
+                elif device_id:
+                    q = q.eq("device_id", device_id)
+                else:
+                    return 0
+                res = q.gte("created_at", since).execute()
                 return res.count or 0
             except Exception as exc:
                 log.warning("quota count via supabase failed: %s", exc)
 
-        # Memory fallback
+        # Memory fallback (cle = user_id en priorite, sinon device_id)
+        key = user_id or device_id
+        if not key:
+            return 0
         now = time.time()
-        timestamps = [t for t in self._memory[device_id] if now - t < QUOTA_WINDOW_SEC]
-        self._memory[device_id] = timestamps
+        timestamps = [t for t in self._memory[key] if now - t < QUOTA_WINDOW_SEC]
+        self._memory[key] = timestamps
         return len(timestamps)
 
-    def check(self, device_id: Optional[str], is_premium: bool = False) -> Tuple[bool, dict]:
-        """Verifie si le device peut effectuer une nouvelle restauration.
+    def check(
+        self,
+        device_id: Optional[str] = None,
+        is_premium: bool = False,
+        user_id: Optional[str] = None,
+    ) -> Tuple[bool, dict]:
+        """Verifie si l'utilisateur peut effectuer une nouvelle restauration.
+
+        Priorite : user_id (authentifie) > device_id (anonyme).
 
         Returns:
             (allowed, info_dict) ou info contient: used, limit, remaining, reset_in_sec
@@ -66,14 +84,14 @@ class QuotaService:
                 "used": 0, "limit": -1, "remaining": -1,
                 "premium": True,
             }
-        if not device_id:
-            # Pas d'ID = on bloque pour eviter abus (ou autoriser 1 fois en demo?)
+        if not user_id and not device_id:
+            # Aucun identifiant = on bloque
             return False, {
                 "used": 0, "limit": DAILY_FREE_LIMIT, "remaining": 0,
-                "reason": "missing_device_id",
+                "reason": "missing_identifier",
             }
 
-        used = self._count_recent(device_id)
+        used = self._count_recent(user_id=user_id, device_id=device_id)
         remaining = max(0, DAILY_FREE_LIMIT - used)
         return remaining > 0, {
             "used": used,
@@ -81,9 +99,19 @@ class QuotaService:
             "remaining": remaining,
             "reset_in_sec": QUOTA_WINDOW_SEC,
             "premium": False,
+            "identifier": "user" if user_id else "device",
         }
 
-    def record(self, device_id: Optional[str]) -> None:
-        """Enregistre une utilisation en memoire (pour le fallback non-Supabase)."""
-        if device_id and not (self.supabase and self.supabase.is_configured):
-            self._memory[device_id].append(time.time())
+    def record(
+        self,
+        device_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> None:
+        """Enregistre une utilisation en memoire (fallback si Supabase off).
+
+        Cle = user_id si dispo, sinon device_id.
+        """
+        if not (self.supabase and self.supabase.is_configured):
+            key = user_id or device_id
+            if key:
+                self._memory[key].append(time.time())

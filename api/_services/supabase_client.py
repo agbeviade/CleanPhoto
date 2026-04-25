@@ -116,3 +116,61 @@ class SupabaseClient:
         except Exception as exc:
             log.warning("get_user_quota failed: %s", exc)
             return 0
+
+    # ------------------------------------------------------------------
+    # Premium status (source de verite cote serveur)
+    # ------------------------------------------------------------------
+    def get_premium_status(self, user_id: Optional[str]) -> bool:
+        """Retourne True si l'utilisateur a un abonnement premium actif.
+
+        Lit la table `subscriptions` avec le service_role. Verifie aussi
+        que `expires_at` n'est pas depasse (ou null = lifetime).
+        """
+        if not self._client or not user_id:
+            return False
+        try:
+            res = (
+                self._client.table("subscriptions")
+                .select("is_premium, expires_at")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            rows = res.data or []
+            if not rows:
+                return False
+            row = rows[0]
+            if not row.get("is_premium"):
+                return False
+            expires_at = row.get("expires_at")
+            if expires_at:
+                # Verifier que pas expire
+                from datetime import datetime, timezone
+                try:
+                    dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                    if dt < datetime.now(timezone.utc):
+                        return False  # Abonnement expire
+                except Exception:
+                    pass  # Si parse fail, on accorde le benefice du doute
+            return True
+        except Exception as exc:
+            log.warning("get_premium_status failed: %s", exc)
+            return False
+
+    def get_global_count_24h(self) -> int:
+        """Compte total des restaurations sur les 24 dernieres heures (cap global anti-abus)."""
+        if not self._client:
+            return 0
+        try:
+            from datetime import datetime, timedelta, timezone
+            since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            res = (
+                self._client.table("restorations")
+                .select("id", count="exact")
+                .gte("created_at", since)
+                .execute()
+            )
+            return res.count or 0
+        except Exception as exc:
+            log.warning("get_global_count_24h failed: %s", exc)
+            return 0
