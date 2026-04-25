@@ -69,21 +69,22 @@ class ReplicateProvider:
         u = self.upscale if upscale is None else max(1, min(4, int(upscale)))
 
         # Image en data URI (Replicate accepte URLs et data URIs)
-        b64 = base64.b64encode(src_bytedcii")
+        b64 = base64.b64encode(src_bytes).decode("ascii")
         data_uri = f"data:image/jpeg;base64,{b64}"
 
         headers = {
             "Authorization": f"Token {self.token}",
             "Content-Type": "application/json",
             "Prefer": "wait",  # bloquant cote Replicate jusqu'a 60s
-        }p
+        }
+        payload = {
             "version": self.version,
             "input": {
                 "image": data_uri,
-                "codeformer_fidelity": self.fidelity,
+                "codeformer_fidelity": f,
                 "background_enhance": True,
                 "face_upsample": True,
-                "upscale": self.upscale,
+                "upscale": u,
             },
         }
 

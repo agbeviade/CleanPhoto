@@ -19,6 +19,7 @@ import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from .replicate_provider import ReplicateProvider
+from .replicate_pipeline import ReplicatePipeline
 from .openai_provider import OpenAIProvider
 
 log = logging.getLogger("souvenir.restore")
@@ -41,9 +42,13 @@ class RestoreService:
         self._codeformer = None
         self._upsampler = None
         self._replicate = ReplicateProvider.from_env()
+        self._pipeline = ReplicatePipeline.from_env()
         self._openai = OpenAIProvider.from_env()
+        # Pipeline multi-modeles active par defaut sur Replicate
+        self.use_pipeline = os.getenv("REPLICATE_USE_PIPELINE", "1") == "1"
 
-        # Auto-detect (priorite: replicate > advanced > basic > lite)
+        # Auto-detect : OpenAI n'est PAS auto-selectionne (premium opt-in
+        # uniquement, force via provider="openai" en requete).
         if forced == "lite":
             self.mode = "lite"
         elif forced == "basic" and HAS_CV2:
@@ -55,19 +60,17 @@ class RestoreService:
         elif forced == "advanced":
             self.mode = "advanced" if self._can_load_advanced() else "basic" if HAS_CV2 else "lite"
         else:
-            # Auto: replicate par defaut (rapide + economique)
+            # Auto : replicate (rapide + economique). OpenAI ignore en auto.
             if self._replicate.is_configured:
                 self.mode = "replicate"
-            elif self._openai.is_configured:
-                self.mode = "openai"
             elif self._can_load_advanced():
                 self.mode = "advanced"
             elif HAS_CV2:
                 self.mode = "basic"
             else:
                 self.mode = "lite"
-        log.info("Pipeline mode: %s (cv2=%s, replicate=%s, openai=%s)",
-                 self.mode, HAS_CV2,
+        log.info("Pipeline mode: %s (pipeline=%s, cv2=%s, replicate=%s, openai=%s)",
+                 self.mode, self.use_pipeline, HAS_CV2,
                  self._replicate.is_configured, self._openai.is_configured)
 
     def _can_load_advanced(self) -> bool:
@@ -84,6 +87,9 @@ class RestoreService:
     def pipeline_info(self) -> dict:
         return {
             "mode": self.mode,
+            "use_pipeline": self.use_pipeline,
+            "pipeline_steps": ["repair(BOPBTL)", "colorize(DDColor,auto-N&B)",
+                                "face+upscale(CodeFormer)"],
             "cv2_available": HAS_CV2,
             "replicate_configured": self._replicate.is_configured,
             "openai_configured": self._openai.is_configured,
@@ -127,12 +133,22 @@ class RestoreService:
                 chosen = "replicate"
 
         if chosen == "replicate" and self._replicate.is_configured:
+            # 1) Pipeline multi-modeles complet (BOPBTL + DDColor + CodeFormer)
+            if self.use_pipeline and self._pipeline.is_configured:
+                try:
+                    return self._pipeline.restore_bytes(
+                        src_bytes, fidelity=fidelity, upscale=upscale,
+                    )
+                except Exception as exc:
+                    log.exception("Pipeline failed -> fallback CodeFormer seul: %s",
+                                  exc)
+            # 2) Fallback : CodeFormer seul (single-shot)
             try:
                 return self._replicate.restore_bytes(
                     src_bytes, fidelity=fidelity, upscale=upscale,
                 )
             except Exception as exc:
-                log.exception("Replicate failed -> fallback: %s", exc)
+                log.exception("Replicate failed -> fallback local: %s", exc)
         if self.mode == "advanced":
             try:
                 return self._restore_advanced_bytes(src_bytes)
