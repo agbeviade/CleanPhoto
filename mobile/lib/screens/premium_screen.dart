@@ -1,9 +1,18 @@
 import 'package:flutter/material.dart';
 import '../theme.dart';
+import '../services/payment_service.dart';
 import '../services/premium_service.dart';
 
-class PremiumScreen extends StatelessWidget {
+class PremiumScreen extends StatefulWidget {
   const PremiumScreen({super.key});
+
+  @override
+  State<PremiumScreen> createState() => _PremiumScreenState();
+}
+
+class _PremiumScreenState extends State<PremiumScreen> {
+  bool _processing = false;
+  String _selectedPlan = 'monthly';
 
   static const _features = [
     ('Restaurations illimitees', Icons.all_inclusive),
@@ -15,6 +24,9 @@ class PremiumScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final priceLabel = _selectedPlan == 'lifetime'
+        ? '2 999 F CFA - une fois'
+        : '2 999 F CFA / mois';
     return Scaffold(
       appBar: AppBar(
         title: const Text('Souvenir AI Premium',
@@ -92,36 +104,58 @@ class PremiumScreen extends StatelessWidget {
                     ),
                   )),
               const SizedBox(height: 24),
-              _planCard(
-                title: 'Mensuel',
-                price: '4,99 €',
-                period: '/ mois',
-                highlighted: false,
+              GestureDetector(
+                onTap: _processing
+                    ? null
+                    : () => setState(() => _selectedPlan = 'monthly'),
+                child: _planCard(
+                  title: 'Mensuel',
+                  price: '2 999 F CFA',
+                  period: '/ 30 jours',
+                  highlighted: _selectedPlan == 'monthly',
+                ),
               ),
               const SizedBox(height: 12),
-              _planCard(
-                title: 'Annuel',
-                price: '39,99 €',
-                period: '/ an',
-                highlighted: true,
-                badge: 'Economisez 33%',
+              GestureDetector(
+                onTap: _processing
+                    ? null
+                    : () => setState(() => _selectedPlan = 'lifetime'),
+                child: _planCard(
+                  title: 'A vie',
+                  price: '2 999 F CFA',
+                  period: 'paiement unique',
+                  highlighted: _selectedPlan == 'lifetime',
+                  badge: 'Recommande',
+                ),
               ),
               const SizedBox(height: 24),
               ElevatedButton(
-                onPressed: () => _activate(context),
+                onPressed: _processing ? null : () => _startPayment(context),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.accentRed,
                   padding: const EdgeInsets.symmetric(vertical: 18),
                 ),
-                child: const Text('Souscrire',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                child: _processing
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: Colors.white,
+                        ),
+                      )
+                    : Text('Payer $priceLabel',
+                        style: const TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.w700)),
               ),
               const SizedBox(height: 8),
               Center(
                 child: Text(
-                  'Facturation Google Play / App Store - resiliable a tout moment',
+                  'Paiement securise via GeniusPay\nWave - Orange Money - MTN - Cartes bancaires',
                   style: TextStyle(
-                      color: AppColors.textMuted.withOpacity(0.8), fontSize: 11),
+                      color: AppColors.textMuted.withOpacity(0.8),
+                      fontSize: 11,
+                      height: 1.5),
                   textAlign: TextAlign.center,
                 ),
               ),
@@ -206,17 +240,86 @@ class PremiumScreen extends StatelessWidget {
     );
   }
 
-  Future<void> _activate(BuildContext context) async {
-    // Hook IAP : a remplacer par RevenueCat / Google Play Billing.
-    // Pour MVP, on simule l'activation locale.
-    await PremiumService.setPremium(true);
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Premium active (simulation)'),
-        behavior: SnackBarBehavior.floating,
+  Future<void> _startPayment(BuildContext context) async {
+    setState(() => _processing = true);
+    try {
+      final init = await PaymentService.createPayment(plan: _selectedPlan);
+      final ok = await PaymentService.openCheckout(init.checkoutUrl);
+      if (!ok) {
+        throw Exception('Impossible d\'ouvrir la page de paiement');
+      }
+      if (!context.mounted) return;
+
+      // Affiche un dialog en attendant la confirmation webhook
+      _showWaitingDialog(context, init.reference);
+
+      // Polling backend pour confirmer le paiement
+      final completed = await PaymentService.waitForCompletion(init.reference);
+
+      if (!context.mounted) return;
+      Navigator.of(context, rootNavigator: true).pop(); // ferme dialog
+
+      if (completed) {
+        await PremiumService.setPremium(true);
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Premium active ! Merci pour votre soutien.'),
+            backgroundColor: Color(0xFF2E7D32),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        Navigator.pop(context, true);
+      } else {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'Paiement non confirme. Si vous avez paye, le statut sera mis a jour automatiquement.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Erreur paiement: $e'),
+          backgroundColor: AppColors.accentRed,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _processing = false);
+    }
+  }
+
+  void _showWaitingDialog(BuildContext context, String reference) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('En attente du paiement'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            const Text(
+              'Finalisez le paiement dans la fenetre du navigateur. '
+              'Cette page se mettra a jour automatiquement.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 8),
+            Text('Ref: $reference',
+                style: const TextStyle(
+                    fontSize: 11,
+                    color: AppColors.textMuted,
+                    fontFamily: 'monospace')),
+          ],
+        ),
       ),
     );
-    Navigator.pop(context, true);
   }
 }

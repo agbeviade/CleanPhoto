@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import io
+import json
 import uuid
 import time
 import logging
@@ -28,6 +29,7 @@ from ._services.supabase_client import SupabaseClient
 from ._services.quota_service import QuotaService, DAILY_FREE_LIMIT
 from ._services.watermark import add_watermark
 from ._services.auth_service import AuthService
+from ._services.geniuspay_client import GeniusPayClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("souvenir")
@@ -50,6 +52,12 @@ restore_service = RestoreService()
 supabase = SupabaseClient.from_env()
 quota_service = QuotaService(supabase)
 auth_service = AuthService.from_env()
+geniuspay = GeniusPayClient.from_env()
+
+# Premium pricing (FCFA, mensuel manuel par defaut)
+PREMIUM_PRICE_XOF = int(os.getenv("PREMIUM_PRICE_XOF", "2999"))
+PREMIUM_PLAN = os.getenv("PREMIUM_PLAN", "monthly")  # monthly | lifetime
+PREMIUM_DURATION_DAYS = int(os.getenv("PREMIUM_DURATION_DAYS", "30"))
 
 
 def _device_id(request: Request) -> Optional[str]:
@@ -191,6 +199,224 @@ async def iap_verify(request: Request):
         raise HTTPException(status_code=500, detail="Echec activation premium")
     return {"status": "premium_activated", "scope": scope, "plan": plan,
             "expires_at": expires_at}
+
+
+@app.post("/api/payments/create")
+async def payments_create(request: Request):
+    """Initie un paiement Premium via GeniusPay.
+
+    Body JSON optionnel: {plan?: 'monthly'|'lifetime', success_url?, error_url?}
+    Sinon utilise les defauts (PREMIUM_PLAN env, PREMIUM_PRICE_XOF env).
+
+    Headers requis: X-Device-Id (mode anonyme) ou Authorization (auth).
+
+    Retourne: {reference, checkout_url, amount, currency, plan, expires_at?}.
+    L'app doit ouvrir checkout_url puis ecouter le retour ou
+    poll /api/payments/status?reference=... pour confirmer.
+    """
+    if not geniuspay.is_configured:
+        raise HTTPException(status_code=503,
+                            detail="Paiement non configure (GeniusPay)")
+    if not supabase.is_configured:
+        raise HTTPException(status_code=503, detail="Supabase non configure")
+
+    device_id = _device_id(request)
+    user_id = _user_id(request)
+    if not device_id and not user_id:
+        raise HTTPException(status_code=400,
+                            detail="X-Device-Id ou Authorization requis")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    plan = (body.get("plan") or PREMIUM_PLAN).lower()
+    if plan not in ("monthly", "lifetime"):
+        raise HTTPException(status_code=400, detail="plan invalide")
+
+    success_url = body.get("success_url")
+    error_url = body.get("error_url")
+
+    description = (
+        "Souvenir AI - Premium a vie" if plan == "lifetime"
+        else "Souvenir AI - Premium 30 jours"
+    )
+    metadata = {
+        "plan": plan,
+        "device_id": device_id or "",
+        "user_id": user_id or "",
+        "app": "souvenir",
+    }
+
+    try:
+        data = geniuspay.create_payment(
+            amount=PREMIUM_PRICE_XOF,
+            currency="XOF",
+            description=description,
+            success_url=success_url,
+            error_url=error_url,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        log.exception("geniuspay create_payment failed")
+        raise HTTPException(status_code=502,
+                            detail=f"GeniusPay indisponible: {exc}")
+
+    reference = data.get("reference")
+    checkout_url = data.get("checkout_url") or data.get("payment_url")
+    if not reference or not checkout_url:
+        log.error("geniuspay reponse incomplete: %s", data)
+        raise HTTPException(status_code=502,
+                            detail="Reponse GeniusPay incomplete")
+
+    # Persiste le paiement (status pending)
+    supabase.insert_payment(
+        reference=reference,
+        amount=PREMIUM_PRICE_XOF,
+        plan=plan,
+        device_id=device_id,
+        user_id=user_id,
+        currency="XOF",
+        checkout_url=checkout_url,
+        raw_response=data,
+    )
+
+    return {
+        "reference": reference,
+        "checkout_url": checkout_url,
+        "amount": PREMIUM_PRICE_XOF,
+        "currency": "XOF",
+        "plan": plan,
+        "expires_in_days": (PREMIUM_DURATION_DAYS if plan == "monthly" else None),
+        "status": data.get("status", "pending"),
+    }
+
+
+@app.get("/api/payments/status")
+def payments_status(request: Request, reference: str):
+    """Retourne le status d'un paiement (pour polling cote app)."""
+    if not supabase.is_configured:
+        raise HTTPException(status_code=503, detail="Supabase non configure")
+    p = supabase.get_payment_by_reference(reference)
+    if not p:
+        raise HTTPException(status_code=404, detail="Paiement introuvable")
+    # Verif autorisation : seul le proprietaire (device ou user) peut lire
+    device_id = _device_id(request)
+    user_id = _user_id(request)
+    if user_id and p.get("user_id") and p["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Acces refuse")
+    if device_id and p.get("device_id") and p["device_id"] != device_id and not user_id:
+        raise HTTPException(status_code=403, detail="Acces refuse")
+    return {
+        "reference": p.get("reference"),
+        "status": p.get("status"),
+        "amount": p.get("amount"),
+        "currency": p.get("currency"),
+        "plan": p.get("plan"),
+        "completed_at": p.get("completed_at"),
+    }
+
+
+@app.post("/api/payments/webhook")
+async def payments_webhook(request: Request):
+    """Webhook GeniusPay : active premium quand payment.success.
+
+    Securite:
+      - Verif signature HMAC-SHA256
+      - Anti-replay : timestamp tolerance 5 min
+      - Idempotency : check status avant de reactiver
+
+    Headers attendus: X-Webhook-Signature, X-Webhook-Timestamp, X-Webhook-Event
+    """
+    if not geniuspay.webhook_secret:
+        # Si pas de secret configure, on refuse tout (mode prod safe par defaut)
+        log.error("webhook recu mais GENIUSPAY_WEBHOOK_SECRET non configure")
+        raise HTTPException(status_code=503, detail="Webhook non configure")
+
+    raw = await request.body()
+    signature = request.headers.get("X-Webhook-Signature")
+    timestamp = request.headers.get("X-Webhook-Timestamp")
+    event = request.headers.get("X-Webhook-Event") or ""
+
+    if not geniuspay.verify_webhook(signature, timestamp, raw):
+        raise HTTPException(status_code=401, detail="Signature invalide")
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON invalide")
+
+    data = payload.get("data") or {}
+    reference = data.get("reference")
+    if not reference:
+        raise HTTPException(status_code=400, detail="reference manquante")
+
+    log.info("webhook geniuspay event=%s ref=%s status=%s",
+             event, reference, data.get("status"))
+
+    # Idempotency : si deja completed, on ne refait rien
+    existing = supabase.get_payment_by_reference(reference) if supabase.is_configured else None
+    if existing and existing.get("status") == "completed":
+        return {"status": "already_processed"}
+
+    # Cas success
+    is_success = (
+        event == "payment.success"
+        or (data.get("status") in ("completed", "success"))
+    )
+    if is_success:
+        # Recupere le contexte (device_id / user_id / plan) depuis notre row pending
+        device_id = (existing or {}).get("device_id")
+        user_id = (existing or {}).get("user_id")
+        plan = (existing or {}).get("plan") or PREMIUM_PLAN
+        # Fallback : metadata GeniusPay (au cas ou la row n'existe pas)
+        meta = data.get("metadata") or {}
+        device_id = device_id or meta.get("device_id") or None
+        user_id = user_id or meta.get("user_id") or None
+        plan = plan or meta.get("plan") or PREMIUM_PLAN
+
+        # Calcul expires_at
+        expires_at = None
+        if plan == "monthly":
+            from datetime import datetime, timedelta, timezone
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(days=PREMIUM_DURATION_DAYS)
+            ).isoformat()
+
+        # Active premium (user_id prioritaire, sinon device_id)
+        ok = False
+        if user_id:
+            ok = supabase.set_premium_user(
+                user_id=user_id, plan=plan, expires_at=expires_at,
+                provider="geniuspay", receipt=reference,
+            )
+        elif device_id:
+            ok = supabase.set_premium_device(
+                device_id=device_id, plan=plan, expires_at=expires_at,
+                provider="geniuspay", receipt=reference,
+            )
+        else:
+            log.error("webhook success mais ni user_id ni device_id (ref=%s)",
+                      reference)
+
+        supabase.update_payment_status(
+            reference=reference,
+            status="completed" if ok else "completed_no_target",
+            raw_webhook=payload,
+            completed=True,
+        )
+        return {"status": "ok", "premium_activated": ok}
+
+    # Cas echec / autre
+    if event == "payment.failed" or data.get("status") == "failed":
+        supabase.update_payment_status(
+            reference=reference, status="failed", raw_webhook=payload,
+        )
+        return {"status": "ok", "marked": "failed"}
+
+    # Event inconnu : on accuse reception sans rien faire
+    return {"status": "ignored", "event": event}
 
 
 @app.get("/api/me")

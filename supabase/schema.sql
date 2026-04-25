@@ -175,6 +175,44 @@ begin
     end if;
 end $$;
 
+-- 4bis. Table des paiements (GeniusPay - tracking + idempotency)
+-- Chaque ligne = une transaction GeniusPay. Idempotency par reference (unique).
+-- Le webhook met a jour le status et active la subscription quand status=success.
+create table if not exists public.payments (
+    id              bigserial primary key,
+    reference       text not null unique,        -- MTX-... (GeniusPay)
+    provider        text not null default 'geniuspay',
+    user_id         uuid references auth.users(id) on delete set null,
+    device_id       text,
+    plan            text,                        -- 'monthly' | 'lifetime'
+    amount          integer not null,            -- en plus petite unite (XOF = unite directe)
+    currency        text not null default 'XOF',
+    status          text not null default 'pending',  -- pending | completed | failed | expired
+    checkout_url    text,
+    raw_response    jsonb,                       -- copie de la reponse GeniusPay (debug)
+    raw_webhook     jsonb,                       -- copie du payload webhook recu
+    created_at      timestamptz not null default now(),
+    completed_at    timestamptz,
+    constraint payments_user_or_device check (user_id is not null or device_id is not null)
+);
+
+create index if not exists payments_device_idx on public.payments(device_id);
+create index if not exists payments_user_idx on public.payments(user_id);
+create index if not exists payments_status_idx on public.payments(status, created_at desc);
+
+alter table public.payments enable row level security;
+
+drop policy if exists "users read own payments" on public.payments;
+create policy "users read own payments"
+  on public.payments for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "service role full access payments" on public.payments;
+create policy "service role full access payments"
+  on public.payments for all
+  using (auth.role() = 'service_role')
+  with check (auth.role() = 'service_role');
+
 -- 5. Storage bucket (a executer aussi via Storage UI ou CLI)
 -- Dans Supabase Studio > Storage > Create bucket "souvenir" (PUBLIC)
 -- Folders attendus dans le bucket: uploads/, outputs/

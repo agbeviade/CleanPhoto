@@ -211,6 +211,83 @@ class SupabaseClient:
             log.warning("set_premium_user failed: %s", exc)
             return False
 
+    # ------------------------------------------------------------------
+    # Paiements GeniusPay
+    # ------------------------------------------------------------------
+    def insert_payment(
+        self,
+        reference: str,
+        amount: int,
+        plan: str,
+        device_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        currency: str = "XOF",
+        provider: str = "geniuspay",
+        checkout_url: Optional[str] = None,
+        raw_response: Optional[dict] = None,
+    ) -> bool:
+        """Enregistre un paiement initie (status pending). Idempotent par reference."""
+        if not self._client:
+            return False
+        try:
+            self._client.table("payments").upsert({
+                "reference": reference,
+                "provider": provider,
+                "user_id": user_id,
+                "device_id": device_id,
+                "plan": plan,
+                "amount": amount,
+                "currency": currency,
+                "status": "pending",
+                "checkout_url": checkout_url,
+                "raw_response": raw_response,
+            }, on_conflict="reference").execute()
+            return True
+        except Exception as exc:
+            log.warning("insert_payment failed: %s", exc)
+            return False
+
+    def get_payment_by_reference(self, reference: str) -> Optional[dict]:
+        """Recupere un paiement par sa reference (pour idempotency webhook)."""
+        if not self._client:
+            return None
+        try:
+            res = (
+                self._client.table("payments")
+                .select("*")
+                .eq("reference", reference)
+                .limit(1)
+                .execute()
+            )
+            rows = res.data or []
+            return rows[0] if rows else None
+        except Exception as exc:
+            log.warning("get_payment_by_reference failed: %s", exc)
+            return None
+
+    def update_payment_status(
+        self,
+        reference: str,
+        status: str,
+        raw_webhook: Optional[dict] = None,
+        completed: bool = False,
+    ) -> bool:
+        """Met a jour le status d'un paiement (apres webhook)."""
+        if not self._client:
+            return False
+        try:
+            from datetime import datetime, timezone
+            update_data: dict = {"status": status, "raw_webhook": raw_webhook}
+            if completed:
+                update_data["completed_at"] = datetime.now(timezone.utc).isoformat()
+            self._client.table("payments").update(update_data).eq(
+                "reference", reference
+            ).execute()
+            return True
+        except Exception as exc:
+            log.warning("update_payment_status failed: %s", exc)
+            return False
+
     def get_global_count_24h(self) -> int:
         """Compte total des restaurations sur les 24 dernieres heures (cap global anti-abus)."""
         if not self._client:
