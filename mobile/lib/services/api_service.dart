@@ -137,6 +137,7 @@ class ApiService {
     final s = settings ?? await SettingsService.load();
     request.fields['fidelity'] = s.fidelity.toStringAsFixed(2);
     request.fields['upscale'] = s.upscale.toString();
+    request.fields['colorize'] = s.colorize.apiValue;
 
     final streamed = await request.send().timeout(const Duration(seconds: 90));
     final response = await http.Response.fromStream(streamed);

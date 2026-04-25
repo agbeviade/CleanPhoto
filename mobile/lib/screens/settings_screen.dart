@@ -114,6 +114,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 const SizedBox(height: 16),
                 _section(
+                  icon: Icons.palette_outlined,
+                  title: 'Colorisation',
+                  subtitle:
+                      'Ajout de couleurs realistes aux photos N&B / sepia (DDColor).',
+                  child: Column(
+                    children: [
+                      for (final m in ColorizeMode.values)
+                        _colorizeOption(m),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _section(
                   icon: Icons.zoom_in,
                   title: 'Resolution de sortie',
                   subtitle:
@@ -196,6 +209,52 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 16),
           child,
         ],
+      ),
+    );
+  }
+
+  Widget _colorizeOption(ColorizeMode mode) {
+    final selected = _settings.colorize == mode;
+    return InkWell(
+      onTap: () {
+        setState(() => _settings = _settings.copyWith(colorize: mode));
+        _save();
+      },
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        margin: const EdgeInsets.only(bottom: 6),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.softBlue.withOpacity(0.5) : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: selected ? AppColors.primaryBlue : AppColors.lightGrey,
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              selected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+              color: selected ? AppColors.primaryBlue : AppColors.textMuted,
+              size: 20,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(mode.label,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w700, fontSize: 14)),
+                  Text(mode.description,
+                      style: const TextStyle(
+                          fontSize: 11, color: AppColors.textMuted, height: 1.3)),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

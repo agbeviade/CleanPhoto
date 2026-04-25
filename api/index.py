@@ -142,6 +142,7 @@ async def restore(
     provider: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
     quality: Optional[str] = Form(None),
+    colorize: Optional[str] = Form(None),  # "auto" | "on" | "off"
 ):
     """Restaure une photo. Retourne JSON {status, restored_image_url, ...}.
 
@@ -183,6 +184,15 @@ async def restore(
     if effective_provider == "openai" and not is_premium:
         effective_provider = None  # downgrade -> mode auto (replicate)
 
+    # "auto"/None -> None (detection auto), "on" -> True, "off" -> False
+    colorize_arg: Optional[bool] = None
+    if colorize:
+        c = colorize.lower().strip()
+        if c in ("on", "true", "1", "yes"):
+            colorize_arg = True
+        elif c in ("off", "false", "0", "no"):
+            colorize_arg = False
+
     t0 = time.time()
     try:
         restored_bytes = restore_service.restore_bytes(
@@ -192,6 +202,7 @@ async def restore(
             provider=effective_provider,
             prompt=prompt,
             quality=quality,
+            colorize=colorize_arg,
         )
     except Exception as exc:
         log.exception("Restoration failed")

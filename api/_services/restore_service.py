@@ -108,6 +108,7 @@ class RestoreService:
         provider: Optional[str] = None,
         prompt: Optional[str] = None,
         quality: Optional[str] = None,
+        colorize: Optional[bool] = None,
     ) -> bytes:
         """Restaure depuis bytes -> bytes (JPEG). Compatible serverless.
 
@@ -138,6 +139,7 @@ class RestoreService:
                 try:
                     return self._pipeline.restore_bytes(
                         src_bytes, fidelity=fidelity, upscale=upscale,
+                        colorize=colorize,
                     )
                 except Exception as exc:
                     log.exception("Pipeline failed -> fallback CodeFormer seul: %s",
