@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.local
+
+# Vercel
+.vercel/
+
+# Backend artifacts
+backend/uploads/
+backend/outputs/
+backend/models/*.pth
+
+# Flutter
+mobile/.dart_tool/
+mobile/build/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/ios/Pods/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db

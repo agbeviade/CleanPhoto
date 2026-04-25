@@ -1,0 +1,8 @@
+# Vercel root requirements - LITE mode (Pillow only, fits in serverless)
+fastapi==0.115.0
+python-multipart==0.0.9
+pillow==10.4.0
+numpy==1.26.4
+supabase==2.8.1
+pydantic==2.9.2
+requests==2.32.3

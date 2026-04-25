@@ -1,0 +1,62 @@
+name: Flutter build APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/flutter-build.yml'
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: 'Backend API URL'
+        required: true
+        default: 'https://your-app.vercel.app'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: stable
+          cache: true
+
+      - name: Generate native scaffolding
+        run: flutter create --project-name souvenir_ai --org com.souvenirai --platforms=android .
+
+      - name: Restore custom AndroidManifest
+        run: |
+          git checkout HEAD -- android/app/src/main/AndroidManifest.xml || true
+          git checkout HEAD -- android/app/src/main/res/xml/network_security_config.xml || true
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos || true
+
+      - name: Build APK (release)
+        env:
+          API_URL: ${{ github.event.inputs.api_base_url || 'https://your-app.vercel.app' }}
+        run: flutter build apk --release --dart-define=API_BASE_URL=$API_URL
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: souvenir-ai-release-apk
+          path: mobile/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
