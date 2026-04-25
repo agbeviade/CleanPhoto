@@ -10,9 +10,12 @@ import '../config.dart';
 import '../services/api_service.dart';
 import '../services/history_service.dart';
 import '../services/premium_service.dart';
+import '../services/auth_service.dart';
 import 'result_screen.dart';
 import 'history_screen.dart';
 import 'premium_screen.dart';
+import 'settings_screen.dart';
+import 'auth_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -120,6 +123,52 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  void _showAccountSheet() {
+    final user = AuthService.currentUser;
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Icon(Icons.account_circle,
+                size: 56, color: AppColors.primaryBlue),
+            const SizedBox(height: 8),
+            Text(
+              user?.email ?? 'Compte connecte',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Tes restaurations sont synchronisees dans le cloud.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: AppColors.textMuted),
+            ),
+            const SizedBox(height: 20),
+            OutlinedButton.icon(
+              onPressed: () async {
+                Navigator.pop(ctx);
+                await AuthService.signOut();
+                if (mounted) setState(() {});
+              },
+              icon: const Icon(Icons.logout, size: 18),
+              label: const Text('Se deconnecter'),
+              style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _showQuotaDialog(QuotaInfo? info) {
     showDialog(
       context: context,
@@ -194,6 +243,33 @@ class _HomeScreenState extends State<HomeScreen> {
                   color: AppColors.accentRed),
               onPressed: _openPremium,
             ),
+          IconButton(
+            tooltip: AuthService.isLoggedIn ? 'Mon compte' : 'Connexion',
+            icon: Icon(AuthService.isLoggedIn
+                ? Icons.account_circle
+                : Icons.account_circle_outlined),
+            onPressed: () async {
+              if (AuthService.isLoggedIn) {
+                _showAccountSheet();
+              } else {
+                await Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const AuthScreen()),
+                );
+                if (mounted) setState(() {});
+              }
+            },
+          ),
+          IconButton(
+            tooltip: 'Reglages IA',
+            icon: const Icon(Icons.tune),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              );
+            },
+          ),
           IconButton(
             tooltip: 'Historique',
             icon: const Icon(Icons.history),

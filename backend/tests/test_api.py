@@ -170,6 +170,30 @@ def test_watermark_added_for_free():
     assert r.headers.get("x-premium") == "0"
 
 
+def test_me_requires_auth():
+    """Sans Authorization header, /api/me renvoie 401."""
+    r = client.get("/api/me")
+    assert r.status_code == 401
+
+
+def test_history_requires_auth():
+    """Sans Authorization header, /api/history renvoie 401."""
+    r = client.get("/api/history")
+    assert r.status_code == 401
+
+
+def test_restore_with_settings():
+    """fidelity et upscale sont accept\u00e9s en form fields."""
+    data = _fake_jpeg_bytes()
+    r = client.post(
+        "/api/restore",
+        files={"file": ("t.jpg", data, "image/jpeg")},
+        data={"fidelity": "0.5", "upscale": "2"},
+        headers={"X-Device-Id": "test-settings"},
+    )
+    assert r.status_code == 200
+
+
 def test_replicate_provider_configured():
     """Avec token, le provider doit etre detecte comme configure."""
     import os

@@ -86,15 +86,23 @@ class RestoreService:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def restore_bytes(self, src_bytes: bytes) -> bytes:
+    def restore_bytes(
+        self,
+        src_bytes: bytes,
+        fidelity: Optional[float] = None,
+        upscale: Optional[int] = None,
+    ) -> bytes:
         """Restaure depuis bytes -> bytes (JPEG). Compatible serverless.
 
-        Cascade de fallback en cas d'echec:
+        fidelity (0.0-1.0) et upscale (1-4) sont optionnels et applicables au
+        mode replicate. Cascade de fallback en cas d'echec:
           replicate -> advanced (local GPU) -> basic (cv2) -> lite (Pillow)
         """
         if self.mode == "replicate":
             try:
-                return self._replicate.restore_bytes(src_bytes)
+                return self._replicate.restore_bytes(
+                    src_bytes, fidelity=fidelity, upscale=upscale,
+                )
             except Exception as exc:
                 log.exception("Replicate failed -> fallback: %s", exc)
         if self.mode == "advanced":

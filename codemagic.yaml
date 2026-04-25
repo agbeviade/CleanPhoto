@@ -8,6 +8,9 @@ workflows:
       java: 17
       vars:
         API_BASE_URL: "https://clean-photo.vercel.app"
+        # SUPABASE_URL et SUPABASE_ANON_KEY sont a definir dans
+        # Codemagic UI > Environment variables (Secured)
+        # Si absents, l'app fonctionne en mode anonyme (sans cloud history).
     triggering:
       events:
         - push
@@ -56,7 +59,9 @@ workflows:
         working_directory: mobile
         script: |
           flutter build apk --release \
-            --dart-define=API_BASE_URL=$API_BASE_URL
+            --dart-define=API_BASE_URL=$API_BASE_URL \
+            --dart-define=SUPABASE_URL=${SUPABASE_URL:-} \
+            --dart-define=SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-}
 
     artifacts:
       - mobile/build/**/outputs/**/*.apk

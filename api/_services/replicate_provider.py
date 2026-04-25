@@ -51,21 +51,32 @@ class ReplicateProvider:
     def is_configured(self) -> bool:
         return bool(self.token)
 
-    def restore_bytes(self, src_bytes: bytes, timeout: int = 60) -> bytes:
-        """Envoie l'image a Replicate, attend le resultat, telecharge le binaire."""
+    def restore_bytes(
+        self,
+        src_bytes: bytes,
+        timeout: int = 60,
+        fidelity: Optional[float] = None,
+        upscale: Optional[int] = None,
+    ) -> bytes:
+        """Envoie l'image a Replicate, attend le resultat, telecharge le binaire.
+
+        fidelity et upscale (optionnels) overrident les defauts du provider.
+        """
         if not self.token:
             raise RuntimeError("REPLICATE_API_TOKEN absent")
+        # Validation et clamp des overrides
+        f = self.fidelity if fidelity is None else max(0.0, min(1.0, float(fidelity)))
+        u = self.upscale if upscale is None else max(1, min(4, int(upscale)))
 
         # Image en data URI (Replicate accepte URLs et data URIs)
-        b64 = base64.b64encode(src_bytes).decode("ascii")
+        b64 = base64.b64encode(src_bytedcii")
         data_uri = f"data:image/jpeg;base64,{b64}"
 
         headers = {
             "Authorization": f"Token {self.token}",
             "Content-Type": "application/json",
             "Prefer": "wait",  # bloquant cote Replicate jusqu'a 60s
-        }
-        payload = {
+        }p
             "version": self.version,
             "input": {
                 "image": data_uri,

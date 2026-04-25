@@ -5,6 +5,8 @@ import 'package:path/path.dart' as p;
 import '../config.dart';
 import 'device_service.dart';
 import 'premium_service.dart';
+import 'settings_service.dart';
+import 'auth_service.dart';
 
 class RestoreResult {
   final List<int> bytes;
@@ -54,6 +56,35 @@ class QuotaExceededException implements Exception {
   String toString() => 'Limite quotidienne atteinte';
 }
 
+class CloudHistoryItem {
+  final String jobId;
+  final String? beforeUrl;
+  final String? afterUrl;
+  final int? processingMs;
+  final DateTime? createdAt;
+  final String? pipeline;
+
+  CloudHistoryItem({
+    required this.jobId,
+    this.beforeUrl,
+    this.afterUrl,
+    this.processingMs,
+    this.createdAt,
+    this.pipeline,
+  });
+
+  factory CloudHistoryItem.fromJson(Map<String, dynamic> j) => CloudHistoryItem(
+        jobId: j['job_id'] as String? ?? '',
+        beforeUrl: j['before_url'] as String?,
+        afterUrl: j['after_url'] as String?,
+        processingMs: (j['processing_ms'] as num?)?.toInt(),
+        createdAt: j['created_at'] != null
+            ? DateTime.tryParse(j['created_at'] as String)
+            : null,
+        pipeline: j['pipeline'] as String?,
+      );
+}
+
 class ApiService {
   static Uri _u(String path) {
     final base = AppConfig.apiBaseUrl.endsWith('/')
@@ -65,15 +96,37 @@ class ApiService {
   static Future<Map<String, String>> _authHeaders() async {
     final id = await DeviceService.getId();
     final premium = await PremiumService.isPremium();
+    final token = AuthService.accessToken;
     return {
       'X-Device-Id': id,
       if (premium) 'X-Premium': '1',
+      if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
     };
+  }
+
+  /// Recupere l'historique cloud de l'utilisateur connecte.
+  /// Retourne null si non authentifie ou erreur.
+  static Future<List<CloudHistoryItem>?> fetchCloudHistory({int limit = 20}) async {
+    if (!AuthService.isLoggedIn) return null;
+    try {
+      final r = await http
+          .get(_u('/api/history?limit=$limit'), headers: await _authHeaders())
+          .timeout(const Duration(seconds: 8));
+      if (r.statusCode != 200) return null;
+      final body = jsonDecode(r.body) as Map<String, dynamic>;
+      final items = (body['items'] as List?) ?? [];
+      return items
+          .map((e) => CloudHistoryItem.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Endpoint principal: tente d'abord /api/restore (Vercel),
   /// retombe sur /restore-binary pour recuperer toujours des bytes.
-  static Future<RestoreResult> restorePhoto(File image) async {
+  static Future<RestoreResult> restorePhoto(File image,
+      {RestoreSettings? settings}) async {
     final request = http.MultipartRequest('POST', _u('/api/restore'));
     request.headers.addAll(await _authHeaders());
     request.files.add(await http.MultipartFile.fromPath(
@@ -81,6 +134,9 @@ class ApiService {
       image.path,
       filename: p.basename(image.path),
     ));
+    final s = settings ?? await SettingsService.load();
+    request.fields['fidelity'] = s.fidelity.toStringAsFixed(2);
+    request.fields['upscale'] = s.upscale.toString();
 
     final streamed = await request.send().timeout(const Duration(seconds: 90));
     final response = await http.Response.fromStream(streamed);

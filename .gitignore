@@ -31,3 +31,5 @@ mobile/ios/Pods/
 # OS
 .DS_Store
 Thumbs.db
+
+.vercel

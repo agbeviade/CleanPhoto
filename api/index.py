@@ -19,7 +19,7 @@ from pathlib import Path
 
 from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
@@ -27,6 +27,7 @@ from ._services.restore_service import RestoreService
 from ._services.supabase_client import SupabaseClient
 from ._services.quota_service import QuotaService, DAILY_FREE_LIMIT
 from ._services.watermark import add_watermark
+from ._services.auth_service import AuthService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("souvenir")
@@ -48,6 +49,7 @@ app.add_middleware(
 restore_service = RestoreService()
 supabase = SupabaseClient.from_env()
 quota_service = QuotaService(supabase)
+auth_service = AuthService.from_env()
 
 
 def _device_id(request: Request) -> Optional[str]:
@@ -57,6 +59,15 @@ def _device_id(request: Request) -> Optional[str]:
 def _is_premium(request: Request) -> bool:
     # Hook futur: valider via RevenueCat / Stripe / Supabase Auth claim
     return request.headers.get("X-Premium", "0") == "1"
+
+
+def _user_id(request: Request) -> Optional[str]:
+    """Extrait le user_id Supabase depuis le header Authorization: Bearer <jwt>."""
+    auth = request.headers.get("Authorization") or request.headers.get("authorization")
+    if not auth or not auth.lower().startswith("bearer "):
+        return None
+    token = auth.split(" ", 1)[1].strip()
+    return auth_service.user_id_from_token(token)
 
 
 @app.get("/")
@@ -89,8 +100,46 @@ def quota(request: Request):
     return {"allowed": allowed, **info}
 
 
+@app.get("/api/me")
+def me(request: Request):
+    """Retourne {user_id} si JWT valide, sinon 401."""
+    uid = _user_id(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Token invalide ou absent")
+    return {"user_id": uid}
+
+
+@app.get("/api/history")
+def history(request: Request, limit: int = 20):
+    """Liste les restaurations de l'utilisateur courant (cloud)."""
+    uid = _user_id(request)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Authentification requise")
+    if not supabase.is_configured:
+        return {"items": []}
+    try:
+        client = supabase._client  # type: ignore
+        res = (
+            client.table("restorations")
+            .select("job_id, before_url, after_url, processing_ms, created_at, pipeline")
+            .eq("user_id", uid)
+            .order("created_at", desc=True)
+            .limit(min(50, max(1, limit)))
+            .execute()
+        )
+        return {"items": res.data or []}
+    except Exception as exc:
+        log.warning("history fetch failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Erreur historique")
+
+
 @app.post("/api/restore")
-async def restore(request: Request, file: UploadFile = File(...)):
+async def restore(
+    request: Request,
+    file: UploadFile = File(...),
+    fidelity: Optional[float] = Form(None),
+    upscale: Optional[int] = Form(None),
+):
     """Restaure une photo. Retourne JSON {status, restored_image_url, ...}.
 
     Comportement:
@@ -111,6 +160,7 @@ async def restore(request: Request, file: UploadFile = File(...)):
     # --- Quota check ---
     device_id = _device_id(request)
     is_premium = _is_premium(request)
+    user_id = _user_id(request)  # peut etre None si non authentifie
     allowed, quota_info = quota_service.check(device_id, is_premium)
     if not allowed:
         raise HTTPException(
@@ -127,7 +177,9 @@ async def restore(request: Request, file: UploadFile = File(...)):
 
     t0 = time.time()
     try:
-        restored_bytes = restore_service.restore_bytes(src_bytes)
+        restored_bytes = restore_service.restore_bytes(
+            src_bytes, fidelity=fidelity, upscale=upscale,
+        )
     except Exception as exc:
         log.exception("Restoration failed")
         raise HTTPException(status_code=500, detail=f"Echec restauration: {exc}")
@@ -160,6 +212,7 @@ async def restore(request: Request, file: UploadFile = File(...)):
                 after_url=after_url,
                 processing_ms=elapsed_ms,
                 size_bytes=len(src_bytes),
+                user_id=user_id,
                 device_id=device_id,
                 is_premium=is_premium,
                 pipeline=restore_service.pipeline_info()["mode"],
