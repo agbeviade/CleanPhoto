@@ -120,22 +120,29 @@ class SupabaseClient:
     # ------------------------------------------------------------------
     # Premium status (source de verite cote serveur)
     # ------------------------------------------------------------------
-    def get_premium_status(self, user_id: Optional[str]) -> bool:
+    def get_premium_status(
+        self,
+        user_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> bool:
         """Retourne True si l'utilisateur a un abonnement premium actif.
 
+        Priorite : user_id (si authentifie) > device_id (BGMaster style).
         Lit la table `subscriptions` avec le service_role. Verifie aussi
         que `expires_at` n'est pas depasse (ou null = lifetime).
         """
-        if not self._client or not user_id:
+        if not self._client:
+            return False
+        if not user_id and not device_id:
             return False
         try:
-            res = (
-                self._client.table("subscriptions")
-                .select("is_premium, expires_at")
-                .eq("user_id", user_id)
-                .limit(1)
-                .execute()
-            )
+            q = self._client.table("subscriptions").select("is_premium, expires_at")
+            if user_id:
+                q = q.eq("user_id", user_id)
+            else:
+                # Cherche un abonnement device anonyme (user_id null)
+                q = q.eq("device_id", device_id).is_("user_id", "null")
+            res = q.limit(1).execute()
             rows = res.data or []
             if not rows:
                 return False
@@ -144,17 +151,64 @@ class SupabaseClient:
                 return False
             expires_at = row.get("expires_at")
             if expires_at:
-                # Verifier que pas expire
                 from datetime import datetime, timezone
                 try:
                     dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
                     if dt < datetime.now(timezone.utc):
                         return False  # Abonnement expire
                 except Exception:
-                    pass  # Si parse fail, on accorde le benefice du doute
+                    pass
             return True
         except Exception as exc:
             log.warning("get_premium_status failed: %s", exc)
+            return False
+
+    def set_premium_device(
+        self,
+        device_id: str,
+        plan: str = "monthly",
+        expires_at: Optional[str] = None,
+        provider: str = "iap_apple",
+        receipt: Optional[str] = None,
+    ) -> bool:
+        """Marque un device comme premium (BGMaster style, sans login)."""
+        if not self._client or not device_id:
+            return False
+        try:
+            self._client.rpc("set_premium_device", {
+                "p_device_id": device_id,
+                "p_plan": plan,
+                "p_expires_at": expires_at,
+                "p_provider": provider,
+                "p_receipt": receipt,
+            }).execute()
+            return True
+        except Exception as exc:
+            log.warning("set_premium_device failed: %s", exc)
+            return False
+
+    def set_premium_user(
+        self,
+        user_id: str,
+        plan: str = "monthly",
+        expires_at: Optional[str] = None,
+        provider: str = "manual",
+        receipt: Optional[str] = None,
+    ) -> bool:
+        """Marque un user comme premium (apres webhook RevenueCat/Stripe)."""
+        if not self._client or not user_id:
+            return False
+        try:
+            self._client.rpc("set_premium_user", {
+                "p_user_id": user_id,
+                "p_plan": plan,
+                "p_expires_at": expires_at,
+                "p_provider": provider,
+                "p_receipt": receipt,
+            }).execute()
+            return True
+        except Exception as exc:
+            log.warning("set_premium_user failed: %s", exc)
             return False
 
     def get_global_count_24h(self) -> int:

@@ -70,18 +70,23 @@ def _user_id(request: Request) -> Optional[str]:
 DEV_ALLOW_PREMIUM_HEADER = os.getenv("DEV_ALLOW_PREMIUM_HEADER", "0") == "1"
 
 
-def _is_premium(request: Request, user_id: Optional[str] = None) -> bool:
+def _is_premium(
+    request: Request,
+    user_id: Optional[str] = None,
+    device_id: Optional[str] = None,
+) -> bool:
     """Determine si l'utilisateur est premium.
 
     Priorite :
-      1. Si user_id (authentifie) : lit la table subscriptions cote Supabase
-         (source de verite, anti-bypass).
-      2. Si DEV_ALLOW_PREMIUM_HEADER=1 : accepte le header X-Premium=1
+      1. Si user_id (authentifie) : lit subscriptions par user_id.
+      2. Si device_id (BGMaster style, anonyme) : lit subscriptions par device_id.
+      3. Si DEV_ALLOW_PREMIUM_HEADER=1 : accepte le header X-Premium=1
          (mode dev / tests locaux uniquement).
-      3. Sinon : false (utilisateurs anonymes ne peuvent pas etre premium).
+      4. Sinon : false.
     """
-    if user_id and supabase.is_configured:
-        return supabase.get_premium_status(user_id)
+    if supabase.is_configured and (user_id or device_id):
+        if supabase.get_premium_status(user_id=user_id, device_id=device_id):
+            return True
     if DEV_ALLOW_PREMIUM_HEADER:
         return request.headers.get("X-Premium", "0") == "1"
     return False
@@ -117,11 +122,75 @@ def quota(request: Request):
     """Retourne le quota restant pour l'utilisateur (user_id si auth, sinon device)."""
     device_id = _device_id(request)
     user_id = _user_id(request)
-    is_premium = _is_premium(request, user_id=user_id)
+    is_premium = _is_premium(request, user_id=user_id, device_id=device_id)
     allowed, info = quota_service.check(
         device_id=device_id, is_premium=is_premium, user_id=user_id,
     )
     return {"allowed": allowed, **info}
+
+
+@app.post("/api/iap/verify")
+async def iap_verify(request: Request):
+    """Active premium pour un device (BGMaster style) ou un user.
+
+    Body JSON: {provider, receipt, plan?, expires_at?}
+      - provider : 'iap_apple' | 'iap_google' | 'revenuecat' | 'stripe' | 'manual'
+      - receipt  : token transaction (App Store / Google Play / Stripe)
+      - plan     : 'monthly' | 'yearly' | 'lifetime' (default 'monthly')
+      - expires_at: ISO8601 (default null = lifetime)
+
+    Si Authorization: Bearer <jwt>, lie a user_id ; sinon a device_id (X-Device-Id).
+
+    NOTE: La validation reelle du receipt (Apple/Google/Stripe) doit etre
+    ajoutee ici avant production. Ce endpoint est actuellement un placeholder
+    qui FAIT CONFIANCE au client - PROTEGER avec un secret partage ou une
+    vraie validation receipt avant le go-live IAP.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON invalide")
+
+    provider = (body.get("provider") or "").strip()
+    receipt = (body.get("receipt") or "").strip()
+    plan = body.get("plan") or "monthly"
+    expires_at = body.get("expires_at")
+    if not provider or not receipt:
+        raise HTTPException(status_code=400, detail="provider et receipt requis")
+
+    if not supabase.is_configured:
+        raise HTTPException(status_code=503, detail="Supabase non configure")
+
+    # TODO PROD: valider le receipt cote serveur
+    #   - iap_apple    -> POST https://buy.itunes.apple.com/verifyReceipt
+    #   - iap_google   -> Google Play Developer API (purchases.subscriptions.get)
+    #   - revenuecat   -> webhook signature header
+    #   - stripe       -> webhook signature
+    # Pour l'instant: on fait confiance au client (DEV ONLY).
+
+    user_id = _user_id(request)
+    device_id = _device_id(request)
+
+    if user_id:
+        ok = supabase.set_premium_user(
+            user_id=user_id, plan=plan, expires_at=expires_at,
+            provider=provider, receipt=receipt,
+        )
+        scope = "user"
+    elif device_id:
+        ok = supabase.set_premium_device(
+            device_id=device_id, plan=plan, expires_at=expires_at,
+            provider=provider, receipt=receipt,
+        )
+        scope = "device"
+    else:
+        raise HTTPException(status_code=400,
+                            detail="X-Device-Id ou Authorization requis")
+
+    if not ok:
+        raise HTTPException(status_code=500, detail="Echec activation premium")
+    return {"status": "premium_activated", "scope": scope, "plan": plan,
+            "expires_at": expires_at}
 
 
 @app.get("/api/me")
@@ -188,7 +257,7 @@ async def restore(
     # --- Quota check ---
     device_id = _device_id(request)
     user_id = _user_id(request)  # peut etre None si non authentifie
-    is_premium = _is_premium(request, user_id=user_id)
+    is_premium = _is_premium(request, user_id=user_id, device_id=device_id)
 
     # Cap global anti-abus : si DAILY_GLOBAL_LIMIT > 0, on plafonne le total
     # de restaurations 24h glissantes. Empeche un attaquant de cycler des

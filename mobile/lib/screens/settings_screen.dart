@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../theme.dart';
 import '../services/settings_service.dart';
 import '../services/premium_service.dart';
+import '../services/device_service.dart';
 import 'premium_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -15,6 +17,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   RestoreSettings _settings = const RestoreSettings();
   bool _isPremium = false;
   bool _loading = true;
+  String _deviceId = '';
 
   @override
   void initState() {
@@ -25,12 +28,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     final s = await SettingsService.load();
     final p = await PremiumService.isPremium();
+    final id = await DeviceService.getId();
     if (!mounted) return;
     setState(() {
       _settings = s;
       _isPremium = p;
+      _deviceId = id;
       _loading = false;
     });
+  }
+
+  Future<void> _copyDeviceId() async {
+    await Clipboard.setData(ClipboardData(text: _deviceId));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Identifiant copie'),
+        duration: Duration(seconds: 2),
+      ),
+    );
   }
 
   Future<void> _save() async {
@@ -164,8 +180,56 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ],
                   ),
                 ),
+                const SizedBox(height: 16),
+                _deviceIdTile(),
               ],
             ),
+    );
+  }
+
+  Widget _deviceIdTile() {
+    final shortId = _deviceId.length > 14
+        ? '${_deviceId.substring(0, 14)}...'
+        : _deviceId;
+    return InkWell(
+      onTap: _copyDeviceId,
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AppColors.lightGrey),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: AppColors.softBlue.withOpacity(0.5),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.person_outline,
+                  color: AppColors.primaryBlue, size: 20),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text('ID utilisateur',
+                  style:
+                      TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+            ),
+            Text(shortId,
+                style: const TextStyle(
+                    fontSize: 12,
+                    color: AppColors.textMuted,
+                    fontFamily: 'monospace')),
+            const SizedBox(width: 8),
+            const Icon(Icons.copy,
+                size: 16, color: AppColors.textMuted),
+          ],
+        ),
+      ),
     );
   }
 
