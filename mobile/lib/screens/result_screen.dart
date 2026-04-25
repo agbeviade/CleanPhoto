@@ -50,12 +50,19 @@ class _ResultScreenState extends State<ResultScreen> {
   Future<void> _share() async {
     try {
       final tmp = await getTemporaryDirectory();
-      final path = p.join(tmp.path, 'souvenir_share_${DateTime.now().millisecondsSinceEpoch}.jpg');
+      final path = p.join(tmp.path,
+          'souvenir_share_${DateTime.now().millisecondsSinceEpoch}.jpg');
       final f = File(path);
       await f.writeAsBytes(_afterUint8);
+      // CTA viral : texte + lien app pour generer du bouche-a-oreille
+      const link = 'https://clean-photo.vercel.app';
+      const message =
+          "J'ai restaure cette vieille photo en quelques secondes avec Souvenir AI ! "
+          'Essaie gratuitement : $link';
       await Share.shareXFiles(
         [XFile(path)],
-        text: 'Photo restauree avec Souvenir AI',
+        text: message,
+        subject: 'Photo restauree avec Souvenir AI',
       );
     } catch (e) {
       _snack('Erreur partage : $e');

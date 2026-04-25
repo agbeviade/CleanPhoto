@@ -14,6 +14,7 @@ import '../services/auth_service.dart';
 import 'result_screen.dart';
 import 'history_screen.dart';
 import 'premium_screen.dart';
+import 'batch_screen.dart';
 import 'settings_screen.dart';
 import 'auth_screen.dart';
 
@@ -88,6 +89,82 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       _snack('Erreur : $e');
     }
+  }
+
+  Future<void> _pickBatch() async {
+    if (!_isPremium) {
+      // Gate premium : montre l'ecran d'achat
+      _showBatchPremiumGate();
+      return;
+    }
+    try {
+      final List<XFile> picked = await _picker.pickMultiImage(
+        maxWidth: 4000,
+        imageQuality: 95,
+      );
+      if (picked.isEmpty) return;
+      // Limite de securite cote client (anti-abus)
+      const maxBatch = 10;
+      final files = picked.take(maxBatch).toList();
+      // Filtre les formats valides
+      final valid = <File>[];
+      for (final x in files) {
+        final ext = p.extension(x.path).toLowerCase();
+        if (!['.jpg', '.jpeg', '.png'].contains(ext)) continue;
+        final size = await File(x.path).length();
+        if (size > AppConfig.maxImageSizeMB * 1024 * 1024) continue;
+        valid.add(File(x.path));
+      }
+      if (valid.isEmpty) {
+        _snack('Aucune photo valide selectionnee (JPG/PNG, < ${AppConfig.maxImageSizeMB} MB)');
+        return;
+      }
+      if (picked.length > maxBatch) {
+        _snack('Limite a $maxBatch photos par lot. Les premieres sont traitees.');
+      }
+      if (!mounted) return;
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => BatchScreen(sources: valid)),
+      );
+      _refreshQuota();
+    } catch (e) {
+      _snack('Erreur selection : $e');
+    }
+  }
+
+  void _showBatchPremiumGate() {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Row(
+          children: const [
+            Icon(Icons.workspace_premium, color: AppColors.accentRed),
+            SizedBox(width: 8),
+            Text('Fonction Premium'),
+          ],
+        ),
+        content: const Text(
+          'Le traitement par lot vous permet de restaurer jusqu\'a 10 photos d\'un coup. '
+          'Reserve aux membres Premium.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Plus tard'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _openPremium();
+            },
+            style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.accentRed),
+            child: const Text('Devenir Premium'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _restore() async {
@@ -324,6 +401,43 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 10),
+              // Bouton batch (premium) : restaure plusieurs photos d'un coup
+              OutlinedButton.icon(
+                onPressed: _processing ? null : _pickBatch,
+                icon: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    const Icon(Icons.burst_mode_outlined),
+                    if (!_isPremium)
+                      Positioned(
+                        right: -6,
+                        top: -6,
+                        child: Container(
+                          padding: const EdgeInsets.all(2),
+                          decoration: const BoxDecoration(
+                            color: AppColors.accentRed,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.lock,
+                              size: 8, color: Colors.white),
+                        ),
+                      ),
+                  ],
+                ),
+                label: Text(_isPremium
+                    ? 'Restaurer plusieurs photos'
+                    : 'Plusieurs photos (Premium)'),
+                style: OutlinedButton.styleFrom(
+                  side: BorderSide(
+                      color: _isPremium
+                          ? AppColors.primaryBlue
+                          : AppColors.accentRed.withOpacity(0.6)),
+                  foregroundColor: _isPremium
+                      ? AppColors.primaryBlue
+                      : AppColors.accentRed,
+                ),
               ),
               const SizedBox(height: 14),
               ElevatedButton.icon(
