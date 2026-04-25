@@ -31,10 +31,18 @@ workflows:
           # 2. Kotlin 2.1.0 + AGP 8.7.0 dans settings.gradle
           sed -i.bak -E 's/id "org.jetbrains.kotlin.android" version "[^"]+" apply false/id "org.jetbrains.kotlin.android" version "2.1.0" apply false/' android/settings.gradle || true
           sed -i.bak -E 's/id "com.android.application" version "[^"]+" apply false/id "com.android.application" version "8.7.0" apply false/' android/settings.gradle || true
+          # 3. Forcer NDK 27 dans app/build.gradle (requis par les plugins recents)
+          if ! grep -q 'ndkVersion' android/app/build.gradle; then
+            sed -i.bak -E 's/(android \{)/\1\n    ndkVersion "27.0.12077973"/' android/app/build.gradle
+          else
+            sed -i.bak -E 's/ndkVersion[ =]+"[^"]+"/ndkVersion "27.0.12077973"/' android/app/build.gradle
+          fi
           echo "=== gradle-wrapper.properties ==="
           cat android/gradle/wrapper/gradle-wrapper.properties
           echo "=== settings.gradle ==="
           cat android/settings.gradle
+          echo "=== app/build.gradle (10 first lines of android block) ==="
+          grep -A 10 '^android {' android/app/build.gradle | head -15
 
       - name: Get Flutter dependencies
         working_directory: mobile
