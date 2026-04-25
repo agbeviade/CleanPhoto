@@ -1,0 +1,51 @@
+workflows:
+  android-release:
+    name: Souvenir AI - Android Release APK
+    instance_type: linux_x2
+    max_build_duration: 30
+    environment:
+      flutter: 3.24.0
+      java: 17
+      vars:
+        API_BASE_URL: "https://clean-photo.vercel.app"
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+    scripts:
+      - name: Generate Android scaffolding
+        working_directory: mobile
+        script: |
+          flutter create --project-name souvenir_ai --org com.souvenirai --platforms=android .
+          # Restaurer les fichiers customs (AndroidManifest, network_security_config)
+          git checkout HEAD -- android/app/src/main/AndroidManifest.xml || true
+          git checkout HEAD -- android/app/src/main/res/xml/network_security_config.xml || true
+
+      - name: Get Flutter dependencies
+        working_directory: mobile
+        script: flutter pub get
+
+      - name: Flutter analyze (non-blocking)
+        working_directory: mobile
+        script: flutter analyze --no-fatal-infos || true
+
+      - name: Build APK release
+        working_directory: mobile
+        script: |
+          flutter build apk --release \
+            --dart-define=API_BASE_URL=$API_BASE_URL
+
+    artifacts:
+      - mobile/build/**/outputs/**/*.apk
+      - mobile/build/**/outputs/**/mapping.txt
+      - flutter_drive.log
+
+    publishing:
+      email:
+        recipients:
+          - $CM_BUILD_EMAIL
+        notify:
+          success: true
+          failure: true
