@@ -40,6 +40,14 @@ log = logging.getLogger("souvenir.flux")
 API_BASE = "https://api.replicate.com/v1"
 
 DEFAULT_MODEL = "black-forest-labs/flux-kontext-pro"
+# Pro pour tous (Dev n'est pas expose en API serverless sur Replicate).
+# Override possible via env FLUX_FREE_MODEL / FLUX_PREMIUM_MODEL.
+FREE_MODEL = os.getenv(
+    "FLUX_FREE_MODEL", "black-forest-labs/flux-kontext-pro"
+)
+PREMIUM_MODEL = os.getenv(
+    "FLUX_PREMIUM_MODEL", "black-forest-labs/flux-kontext-pro"
+)
 
 # Prompt hardcode applique automatiquement a chaque restauration.
 # Inspire des resultats BGMaster + cahier des charges utilisateur.
@@ -96,15 +104,20 @@ class FluxKontextProvider:
         src_bytes: bytes,
         prompt: Optional[str] = None,
         timeout: int = 120,
+        model: Optional[str] = None,
     ) -> bytes:
         """Envoie l'image a Flux Kontext avec le prompt de restauration.
 
+        Args:
+          model: override du modele (ex: FREE_MODEL pour les gratuits,
+                 PREMIUM_MODEL pour les payants).
         Retourne les bytes de l'image restauree.
         """
         if not self.token:
             raise RuntimeError("REPLICATE_API_TOKEN absent")
 
-        url = f"{API_BASE}/models/{self.model}/predictions"
+        chosen_model = model or self.model
+        url = f"{API_BASE}/models/{chosen_model}/predictions"
         headers = {
             "Authorization": f"Token {self.token}",
             "Content-Type": "application/json",
@@ -119,7 +132,7 @@ class FluxKontextProvider:
                 "aspect_ratio": "match_input_image",
             }
         }
-        log.info("flux: POST %s (prompt=%dch)", self.model,
+        log.info("flux: POST %s (prompt=%dch)", chosen_model,
                  len(payload["input"]["prompt"]))
         r = requests.post(url, headers=headers, json=payload, timeout=timeout)
         if r.status_code >= 400:
@@ -140,7 +153,7 @@ class FluxKontextProvider:
             output = data.get("output")
 
         if status != "succeeded":
-            raise RuntimeError(f"Flux {status}: {data.get('error')}")
+            raise RuntimeError(f"Flux ({chosen_model}) {status}: {data.get('error')}")
 
         out_url = output[0] if isinstance(output, list) else output
         if not out_url or not isinstance(out_url, str):

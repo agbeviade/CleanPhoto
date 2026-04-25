@@ -20,7 +20,7 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from .replicate_provider import ReplicateProvider
 from .replicate_pipeline import ReplicatePipeline
-from .flux_provider import FluxKontextProvider
+from .flux_provider import FluxKontextProvider, FREE_MODEL, PREMIUM_MODEL
 from .openai_provider import OpenAIProvider
 
 log = logging.getLogger("souvenir.restore")
@@ -92,7 +92,8 @@ class RestoreService:
         return {
             "mode": self.mode,
             "primary_engine": "flux-kontext" if (self.use_flux and self._flux.is_configured) else "pipeline",
-            "flux_model": self._flux.model,
+            "flux_model_free": FREE_MODEL,
+            "flux_model_premium": PREMIUM_MODEL,
             "use_flux": self.use_flux,
             "use_pipeline": self.use_pipeline,
             "pipeline_steps": ["repair(BOPBTL)", "colorize(DDColor,auto-N&B)",
@@ -116,6 +117,7 @@ class RestoreService:
         prompt: Optional[str] = None,
         quality: Optional[str] = None,
         colorize: Optional[bool] = None,
+        is_premium: bool = False,
     ) -> bytes:
         """Restaure depuis bytes -> bytes (JPEG). Compatible serverless.
 
@@ -144,7 +146,10 @@ class RestoreService:
             # 1) Flux Kontext (generative img2img, prompt hardcode) - PRIORITAIRE
             if self.use_flux and self._flux.is_configured:
                 try:
-                    return self._flux.restore_bytes(src_bytes, prompt=prompt)
+                    flux_model = PREMIUM_MODEL if is_premium else FREE_MODEL
+                    return self._flux.restore_bytes(
+                        src_bytes, prompt=prompt, model=flux_model,
+                    )
                 except Exception as exc:
                     log.exception("Flux failed -> fallback pipeline: %s", exc)
             # 2) Pipeline multi-modeles (BOPBTL + DDColor + CodeFormer)

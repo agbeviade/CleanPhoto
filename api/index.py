@@ -203,6 +203,7 @@ async def restore(
             prompt=prompt,
             quality=quality,
             colorize=colorize_arg,
+            is_premium=is_premium,
         )
     except Exception as exc:
         log.exception("Restoration failed")
