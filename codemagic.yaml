@@ -4,7 +4,7 @@ workflows:
     instance_type: mac_mini_m2
     max_build_duration: 30
     environment:
-      flutter: 3.24.0
+      flutter: 3.27.1
       java: 17
       vars:
         API_BASE_URL: "https://clean-photo.vercel.app"
@@ -22,6 +22,15 @@ workflows:
           # Restaurer les fichiers customs (AndroidManifest, network_security_config)
           git checkout HEAD -- android/app/src/main/AndroidManifest.xml || true
           git checkout HEAD -- android/app/src/main/res/xml/network_security_config.xml || true
+
+      - name: Bump Kotlin & AGP versions (compatibilite plugins recents)
+        working_directory: mobile
+        script: |
+          # Force Kotlin 2.1.0 + AGP 8.7.0 dans settings.gradle (compatible plugins recents)
+          sed -i.bak -E 's/id "org.jetbrains.kotlin.android" version "[^"]+" apply false/id "org.jetbrains.kotlin.android" version "2.1.0" apply false/' android/settings.gradle || true
+          sed -i.bak -E 's/id "com.android.application" version "[^"]+" apply false/id "com.android.application" version "8.7.0" apply false/' android/settings.gradle || true
+          echo "=== settings.gradle apres patch ==="
+          cat android/settings.gradle
 
       - name: Get Flutter dependencies
         working_directory: mobile
