@@ -11,7 +11,7 @@ on:
       api_base_url:
         description: 'Backend API URL'
         required: true
-        default: 'https://your-app.vercel.app'
+        default: 'https://clean-photo.vercel.app'
 
 jobs:
   build:
@@ -51,7 +51,7 @@ jobs:
 
       - name: Build APK (release)
         env:
-          API_URL: ${{ github.event.inputs.api_base_url || 'https://your-app.vercel.app' }}
+          API_URL: ${{ github.event.inputs.api_base_url || 'https://clean-photo.vercel.app' }}
         run: flutter build apk --release --dart-define=API_BASE_URL=$API_URL
 
       - name: Upload APK
