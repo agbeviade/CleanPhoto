@@ -561,10 +561,20 @@ async def restore(
         device_id=device_id, is_premium=is_premium, user_id=user_id,
     )
     if not allowed:
+        reason = quota_info.get("reason")
+        if reason == "premium_monthly_cap":
+            msg = (
+                "Plafond mensuel premium atteint ({} restaurations / 30 jours). "
+                "Reessayez plus tard ou contactez le support."
+            ).format(quota_info.get("limit", 100))
+        elif reason == "missing_identifier":
+            msg = "Identification requise (X-Device-Id ou Authorization)."
+        else:
+            msg = "Limite quotidienne atteinte"
         raise HTTPException(
             status_code=429,
             detail={
-                "message": "Limite quotidienne atteinte",
+                "message": msg,
                 "quota": quota_info,
             },
         )

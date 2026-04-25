@@ -25,6 +25,10 @@ log = logging.getLogger("souvenir.quota")
 
 DAILY_FREE_LIMIT = int(os.getenv("DAILY_FREE_LIMIT", "3"))
 QUOTA_WINDOW_SEC = 24 * 3600
+# Plafond mensuel pour utilisateurs PREMIUM (anti-abus heavy users).
+# 0 = illimite. Valeur par defaut : 100 photos / 30 jours.
+PREMIUM_MONTHLY_LIMIT = int(os.getenv("PREMIUM_MONTHLY_LIMIT", "100"))
+PREMIUM_WINDOW_SEC = 30 * 24 * 3600
 
 
 class QuotaService:
@@ -37,13 +41,14 @@ class QuotaService:
         self,
         user_id: Optional[str] = None,
         device_id: Optional[str] = None,
+        window_sec: int = QUOTA_WINDOW_SEC,
     ) -> int:
-        """Compte les restaurations 24h pour user_id (prioritaire) OU device_id."""
+        """Compte les restaurations sur une fenetre glissante pour user_id ou device_id."""
         # Supabase : query par user_id si dispo, sinon device_id
         if self.supabase and self.supabase.is_configured:
             try:
                 from datetime import datetime, timedelta, timezone
-                since = (datetime.now(timezone.utc) - timedelta(seconds=QUOTA_WINDOW_SEC)).isoformat()
+                since = (datetime.now(timezone.utc) - timedelta(seconds=window_sec)).isoformat()
                 client = self.supabase._client
                 q = client.table("restorations").select("id", count="exact")
                 if user_id:
@@ -62,7 +67,7 @@ class QuotaService:
         if not key:
             return 0
         now = time.time()
-        timestamps = [t for t in self._memory[key] if now - t < QUOTA_WINDOW_SEC]
+        timestamps = [t for t in self._memory[key] if now - t < window_sec]
         self._memory[key] = timestamps
         return len(timestamps)
 
@@ -80,6 +85,34 @@ class QuotaService:
             (allowed, info_dict) ou info contient: used, limit, remaining, reset_in_sec
         """
         if is_premium:
+            # Plafond mensuel anti-abus pour utilisateurs premium (heavy users).
+            # 0 = illimite (override possible via env).
+            if PREMIUM_MONTHLY_LIMIT > 0 and (user_id or device_id):
+                used_month = self._count_recent(
+                    user_id=user_id, device_id=device_id,
+                    window_sec=PREMIUM_WINDOW_SEC,
+                )
+                remaining = max(0, PREMIUM_MONTHLY_LIMIT - used_month)
+                if remaining <= 0:
+                    log.info(
+                        "premium monthly cap reached user=%s device=%s used=%d",
+                        user_id, device_id, used_month,
+                    )
+                    return False, {
+                        "used": used_month,
+                        "limit": PREMIUM_MONTHLY_LIMIT,
+                        "remaining": 0,
+                        "reset_in_sec": PREMIUM_WINDOW_SEC,
+                        "premium": True,
+                        "reason": "premium_monthly_cap",
+                    }
+                return True, {
+                    "used": used_month,
+                    "limit": PREMIUM_MONTHLY_LIMIT,
+                    "remaining": remaining,
+                    "reset_in_sec": PREMIUM_WINDOW_SEC,
+                    "premium": True,
+                }
             return True, {
                 "used": 0, "limit": -1, "remaining": -1,
                 "premium": True,
