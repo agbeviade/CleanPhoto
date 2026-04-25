@@ -20,6 +20,7 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from .replicate_provider import ReplicateProvider
 from .replicate_pipeline import ReplicatePipeline
+from .flux_provider import FluxKontextProvider
 from .openai_provider import OpenAIProvider
 
 log = logging.getLogger("souvenir.restore")
@@ -43,8 +44,11 @@ class RestoreService:
         self._upsampler = None
         self._replicate = ReplicateProvider.from_env()
         self._pipeline = ReplicatePipeline.from_env()
+        self._flux = FluxKontextProvider.from_env()
         self._openai = OpenAIProvider.from_env()
-        # Pipeline multi-modeles active par defaut sur Replicate
+        # Flux Kontext active par defaut comme moteur principal de restauration
+        self.use_flux = os.getenv("USE_FLUX", "1") == "1"
+        # Pipeline multi-modeles utilise en fallback si Flux echoue
         self.use_pipeline = os.getenv("REPLICATE_USE_PIPELINE", "1") == "1"
 
         # Auto-detect : OpenAI n'est PAS auto-selectionne (premium opt-in
@@ -87,6 +91,9 @@ class RestoreService:
     def pipeline_info(self) -> dict:
         return {
             "mode": self.mode,
+            "primary_engine": "flux-kontext" if (self.use_flux and self._flux.is_configured) else "pipeline",
+            "flux_model": self._flux.model,
+            "use_flux": self.use_flux,
             "use_pipeline": self.use_pipeline,
             "pipeline_steps": ["repair(BOPBTL)", "colorize(DDColor,auto-N&B)",
                                 "face+upscale(CodeFormer)"],
@@ -134,7 +141,13 @@ class RestoreService:
                 chosen = "replicate"
 
         if chosen == "replicate" and self._replicate.is_configured:
-            # 1) Pipeline multi-modeles complet (BOPBTL + DDColor + CodeFormer)
+            # 1) Flux Kontext (generative img2img, prompt hardcode) - PRIORITAIRE
+            if self.use_flux and self._flux.is_configured:
+                try:
+                    return self._flux.restore_bytes(src_bytes, prompt=prompt)
+                except Exception as exc:
+                    log.exception("Flux failed -> fallback pipeline: %s", exc)
+            # 2) Pipeline multi-modeles (BOPBTL + DDColor + CodeFormer)
             if self.use_pipeline and self._pipeline.is_configured:
                 try:
                     return self._pipeline.restore_bytes(
@@ -144,7 +157,7 @@ class RestoreService:
                 except Exception as exc:
                     log.exception("Pipeline failed -> fallback CodeFormer seul: %s",
                                   exc)
-            # 2) Fallback : CodeFormer seul (single-shot)
+            # 3) Fallback ultime : CodeFormer seul (single-shot)
             try:
                 return self._replicate.restore_bytes(
                     src_bytes, fidelity=fidelity, upscale=upscale,
