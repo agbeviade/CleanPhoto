@@ -8,6 +8,31 @@ import 'auth_service.dart';
 import 'device_service.dart';
 import 'premium_service.dart';
 
+/// Description d'un pack hebdomadaire (catalogue dynamique).
+class PackPlan {
+  final String id; // ex: "pack_10_week"
+  final int images;
+  final int price;
+  final int days;
+  final String label;
+
+  const PackPlan({
+    required this.id,
+    required this.images,
+    required this.price,
+    required this.days,
+    required this.label,
+  });
+
+  factory PackPlan.fromJson(String id, Map<String, dynamic> j) => PackPlan(
+        id: id,
+        images: (j['images'] as num).toInt(),
+        price: (j['price'] as num).toInt(),
+        days: (j['days'] as num).toInt(),
+        label: (j['label'] as String?) ?? id,
+      );
+}
+
 /// Resultat d'une initiation de paiement.
 class PaymentInitResult {
   final String reference;
@@ -15,6 +40,8 @@ class PaymentInitResult {
   final int amount;
   final String currency;
   final String plan;
+  final int? packSize;
+  final int? expiresInDays;
 
   const PaymentInitResult({
     required this.reference,
@@ -22,6 +49,8 @@ class PaymentInitResult {
     required this.amount,
     required this.currency,
     required this.plan,
+    this.packSize,
+    this.expiresInDays,
   });
 
   factory PaymentInitResult.fromJson(Map<String, dynamic> j) =>
@@ -30,7 +59,9 @@ class PaymentInitResult {
         checkoutUrl: j['checkout_url'] as String,
         amount: (j['amount'] as num).toInt(),
         currency: (j['currency'] as String?) ?? 'XOF',
-        plan: (j['plan'] as String?) ?? 'monthly',
+        plan: (j['plan'] as String?) ?? 'pack_10_week',
+        packSize: (j['pack_size'] as num?)?.toInt(),
+        expiresInDays: (j['expires_in_days'] as num?)?.toInt(),
       );
 }
 
@@ -59,11 +90,33 @@ class PaymentService {
     };
   }
 
+  /// Recupere le catalogue de packs disponibles a l'achat.
+  /// Retourne null si erreur reseau.
+  static Future<List<PackPlan>?> fetchPlans() async {
+    try {
+      final r = await http
+          .get(_u('/api/plans'))
+          .timeout(const Duration(seconds: 8));
+      if (r.statusCode != 200) return null;
+      final body = jsonDecode(r.body) as Map<String, dynamic>;
+      final raw = (body['plans'] as Map<String, dynamic>?) ?? const {};
+      final plans = <PackPlan>[];
+      raw.forEach((k, v) {
+        if (v is Map<String, dynamic>) plans.add(PackPlan.fromJson(k, v));
+      });
+      // Tri par nombre d'images croissant
+      plans.sort((a, b) => a.images.compareTo(b.images));
+      return plans;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Initie un paiement Premium.
   ///
-  /// [plan] : 'monthly' (default, 30 jours) ou 'lifetime' (a vie).
+  /// [plan] : id du pack (ex: 'pack_10_week', 'pack_50_week', 'pack_100_week').
   static Future<PaymentInitResult> createPayment({
-    String plan = 'monthly',
+    String plan = 'pack_10_week',
   }) async {
     final r = await http
         .post(

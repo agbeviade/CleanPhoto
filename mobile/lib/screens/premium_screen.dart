@@ -12,24 +12,75 @@ class PremiumScreen extends StatefulWidget {
 
 class _PremiumScreenState extends State<PremiumScreen> {
   bool _processing = false;
-  String _selectedPlan = 'monthly';
+  bool _loadingPlans = true;
+  List<PackPlan> _plans = [];
+  String? _selectedPlanId;
+  String? _loadError;
 
   static const _features = [
-    ('Restaurations illimitees', Icons.all_inclusive),
-    ('Sans filigrane', Icons.water_drop_outlined),
-    ('Qualite maximale', Icons.high_quality),
+    ('Sans filigrane sur vos photos', Icons.water_drop_outlined),
+    ('Qualite premium maximale', Icons.high_quality),
+    ('Traitement par lot (jusqu\'a 10 photos)', Icons.burst_mode_outlined),
     ('Traitement prioritaire', Icons.flash_on),
     ('Support dedie', Icons.support_agent),
   ];
 
   @override
+  void initState() {
+    super.initState();
+    _loadPlans();
+  }
+
+  Future<void> _loadPlans() async {
+    setState(() {
+      _loadingPlans = true;
+      _loadError = null;
+    });
+    final list = await PaymentService.fetchPlans();
+    if (!mounted) return;
+    if (list == null || list.isEmpty) {
+      setState(() {
+        _loadingPlans = false;
+        _loadError = 'Impossible de charger les forfaits. Verifiez votre connexion.';
+      });
+      return;
+    }
+    setState(() {
+      _plans = list;
+      // Plan recommande par defaut : 50 photos (rapport qualite-prix)
+      final defaultPick = list.firstWhere(
+        (p) => p.id == 'pack_50_week',
+        orElse: () => list.first,
+      );
+      _selectedPlanId = defaultPick.id;
+      _loadingPlans = false;
+    });
+  }
+
+  PackPlan? get _selectedPlan {
+    if (_selectedPlanId == null) return null;
+    return _plans.firstWhere(
+      (p) => p.id == _selectedPlanId,
+      orElse: () => _plans.first,
+    );
+  }
+
+  String _formatPrice(int xof) {
+    // Formate "2999" -> "2 999 F CFA"
+    final s = xof.toString();
+    final buf = StringBuffer();
+    for (int i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) buf.write(' ');
+      buf.write(s[i]);
+    }
+    return '${buf.toString()} F CFA';
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final priceLabel = _selectedPlan == 'lifetime'
-        ? '2 999 F CFA - une fois'
-        : '2 999 F CFA / mois';
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Souvenir AI Premium',
+        title: const Text('Choisissez votre pack',
             style: TextStyle(fontWeight: FontWeight.w700)),
       ),
       body: SafeArea(
@@ -55,7 +106,7 @@ class _PremiumScreenState extends State<PremiumScreen> {
                         color: Colors.white, size: 36),
                     const SizedBox(height: 12),
                     const Text(
-                      'Liberez tout le potentiel\nde Souvenir AI',
+                      'Restaurez tous vos\nprecieux souvenirs',
                       style: TextStyle(
                         color: Colors.white,
                         fontSize: 22,
@@ -65,7 +116,7 @@ class _PremiumScreenState extends State<PremiumScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Restaurez tous les souvenirs precieux de votre famille, sans limite.',
+                      'Choisissez le pack qui vous convient. Paiement unique, valable 7 jours.',
                       style: TextStyle(
                         color: Colors.white.withOpacity(0.9),
                         fontSize: 14,
@@ -75,79 +126,99 @@ class _PremiumScreenState extends State<PremiumScreen> {
                   ],
                 ),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 20),
               ..._features.map((f) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    padding: const EdgeInsets.symmetric(vertical: 6),
                     child: Row(
                       children: [
                         Container(
-                          width: 36,
-                          height: 36,
+                          width: 32,
+                          height: 32,
                           decoration: BoxDecoration(
                             color: AppColors.softBlue.withOpacity(0.5),
-                            borderRadius: BorderRadius.circular(10),
+                            borderRadius: BorderRadius.circular(8),
                           ),
                           child: Icon(f.$2,
-                              color: AppColors.primaryBlue, size: 20),
+                              color: AppColors.primaryBlue, size: 18),
                         ),
-                        const SizedBox(width: 14),
+                        const SizedBox(width: 12),
                         Expanded(
                           child: Text(f.$1,
                               style: const TextStyle(
-                                  fontSize: 15,
+                                  fontSize: 14,
                                   fontWeight: FontWeight.w600,
                                   color: AppColors.textDark)),
                         ),
                         const Icon(Icons.check_circle,
-                            color: Color(0xFF2E7D32), size: 20),
+                            color: Color(0xFF2E7D32), size: 18),
                       ],
                     ),
                   )),
-              const SizedBox(height: 24),
-              GestureDetector(
-                onTap: _processing
-                    ? null
-                    : () => setState(() => _selectedPlan = 'monthly'),
-                child: _planCard(
-                  title: 'Mensuel',
-                  price: '2 999 F CFA',
-                  period: '/ 30 jours',
-                  highlighted: _selectedPlan == 'monthly',
-                ),
-              ),
-              const SizedBox(height: 12),
-              GestureDetector(
-                onTap: _processing
-                    ? null
-                    : () => setState(() => _selectedPlan = 'lifetime'),
-                child: _planCard(
-                  title: 'A vie',
-                  price: '2 999 F CFA',
-                  period: 'paiement unique',
-                  highlighted: _selectedPlan == 'lifetime',
-                  badge: 'Recommande',
-                ),
-              ),
-              const SizedBox(height: 24),
-              ElevatedButton(
-                onPressed: _processing ? null : () => _startPayment(context),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.accentRed,
-                  padding: const EdgeInsets.symmetric(vertical: 18),
-                ),
-                child: _processing
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.5,
-                          color: Colors.white,
+              const SizedBox(height: 20),
+              if (_loadingPlans)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 40),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (_loadError != null)
+                Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      child: Text(_loadError!,
+                          style: const TextStyle(color: AppColors.accentRed),
+                          textAlign: TextAlign.center),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _loadPlans,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Reessayer'),
+                    ),
+                  ],
+                )
+              else
+                ..._plans.asMap().entries.map((e) {
+                  final idx = e.key;
+                  final p = e.value;
+                  final isMid = _plans.length >= 3 && idx == 1;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: GestureDetector(
+                      onTap: _processing
+                          ? null
+                          : () => setState(() => _selectedPlanId = p.id),
+                      child: _planCard(
+                        plan: p,
+                        highlighted: _selectedPlanId == p.id,
+                        badge: isMid ? 'Recommande' : null,
+                      ),
+                    ),
+                  );
+                }),
+              if (!_loadingPlans && _loadError == null && _selectedPlan != null) ...[
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: _processing ? null : () => _startPayment(context),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.accentRed,
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                  ),
+                  child: _processing
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.5,
+                            color: Colors.white,
+                          ),
+                        )
+                      : Text(
+                          'Payer ${_formatPrice(_selectedPlan!.price)}',
+                          style: const TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w700),
                         ),
-                      )
-                    : Text('Payer $priceLabel',
-                        style: const TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.w700)),
-              ),
+                ),
+              ],
               const SizedBox(height: 8),
               Center(
                 child: Text(
@@ -167,12 +238,12 @@ class _PremiumScreenState extends State<PremiumScreen> {
   }
 
   Widget _planCard({
-    required String title,
-    required String price,
-    required String period,
+    required PackPlan plan,
     bool highlighted = false,
     String? badge,
   }) {
+    final pricePerImage = plan.price / plan.images;
+    final pricePerImageStr = pricePerImage.toStringAsFixed(0);
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -191,7 +262,7 @@ class _PremiumScreenState extends State<PremiumScreen> {
               children: [
                 Row(
                   children: [
-                    Text(title,
+                    Text('${plan.images} photos',
                         style: const TextStyle(
                             fontSize: 16, fontWeight: FontWeight.w700)),
                     if (badge != null) ...[
@@ -216,16 +287,20 @@ class _PremiumScreenState extends State<PremiumScreen> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text(price,
+                    Text(_formatPrice(plan.price),
                         style: const TextStyle(
                             fontSize: 22,
                             fontWeight: FontWeight.w800,
                             color: AppColors.textDark)),
-                    Text(period,
+                    Text('  / ${plan.days}j',
                         style: const TextStyle(
                             fontSize: 13, color: AppColors.textMuted)),
                   ],
                 ),
+                const SizedBox(height: 2),
+                Text('Soit ~ $pricePerImageStr F CFA / photo',
+                    style: const TextStyle(
+                        fontSize: 11, color: AppColors.textMuted)),
               ],
             ),
           ),
@@ -241,9 +316,11 @@ class _PremiumScreenState extends State<PremiumScreen> {
   }
 
   Future<void> _startPayment(BuildContext context) async {
+    final selected = _selectedPlan;
+    if (selected == null) return;
     setState(() => _processing = true);
     try {
-      final init = await PaymentService.createPayment(plan: _selectedPlan);
+      final init = await PaymentService.createPayment(plan: selected.id);
       final ok = await PaymentService.openCheckout(init.checkoutUrl);
       if (!ok) {
         throw Exception('Impossible d\'ouvrir la page de paiement');
