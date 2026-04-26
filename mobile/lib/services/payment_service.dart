@@ -135,10 +135,32 @@ class PaymentService {
   /// Ouvre la page de checkout GeniusPay (navigateur externe).
   ///
   /// Retourne true si l'app a pu lancer l'URL.
+  /// Strategie de fallback :
+  ///   1. externalApplication (navigateur systeme)
+  ///   2. platformDefault (custom tabs / WebView interne)
+  ///   3. inAppWebView (dernier recours)
+  /// On ne fait PAS canLaunchUrl prealable car il peut renvoyer false a tort
+  /// sur Android 11+ si les <queries> sont manquantes (false negative).
   static Future<bool> openCheckout(String checkoutUrl) async {
-    final uri = Uri.parse(checkoutUrl);
-    if (!await canLaunchUrl(uri)) return false;
-    return launchUrl(uri, mode: LaunchMode.externalApplication);
+    final Uri uri;
+    try {
+      uri = Uri.parse(checkoutUrl);
+    } catch (_) {
+      return false;
+    }
+    for (final mode in const [
+      LaunchMode.externalApplication,
+      LaunchMode.platformDefault,
+      LaunchMode.inAppWebView,
+    ]) {
+      try {
+        final ok = await launchUrl(uri, mode: mode);
+        if (ok) return true;
+      } catch (_) {
+        // tente le mode suivant
+      }
+    }
+    return false;
   }
 
   /// Verifie le status d'un paiement (polling apres retour de la page de paiement).
