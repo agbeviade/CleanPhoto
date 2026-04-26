@@ -249,8 +249,12 @@ end;
 $$;
 
 -- Helper : consommer 1 image d'un pack actif (FIFO sur expires_at).
--- Retourne le nombre d'images restantes dans le pack apres consommation,
--- ou -1 si aucun pack disponible (legacy unlimited renvoie 99999).
+-- ATOMIC : utilise UPDATE...WHERE...RETURNING pour eviter les races (C1).
+-- Retourne :
+--    -1 : aucun pack actif
+--     0 : pack epuise (rien decremente)
+-- 99999 : legacy unlimited (pas de decrement)
+--   N>0 : nombre d'images restantes apres consommation
 create or replace function public.consume_pack_image(
     p_user_id uuid default null,
     p_device_id text default null
@@ -261,11 +265,10 @@ as $$
 declare
     v_id bigint;
     v_pack_size int;
-    v_used int;
     v_remaining int;
 begin
-    -- Recherche la sub active pour cet user ou device
-    select id, pack_size, images_used into v_id, v_pack_size, v_used
+    -- 1. Recherche la sub active (read-only, pour determiner le candidat)
+    select id, pack_size into v_id, v_pack_size
     from public.subscriptions
     where is_premium = true
       and (
@@ -274,28 +277,68 @@ begin
       )
       and (expires_at is null or expires_at > now())
     order by expires_at asc nulls last
-    limit 1;
+    limit 1
+    for update;  -- verrou de row pour la suite (anti-race)
 
     if v_id is null then
-        return -1;  -- pas de sub active
+        return -1;
     end if;
 
-    -- Legacy unlimited (pack_size NULL) : pas de decrement, illimite
     if v_pack_size is null then
-        return 99999;
+        return 99999;  -- legacy unlimited
     end if;
 
-    -- Quota epuise
-    if v_used >= v_pack_size then
-        return 0;
+    -- 2. UPDATE atomique avec garde-fou : ne s'execute que si quota dispo
+    update public.subscriptions
+    set images_used = images_used + 1, updated_at = now()
+    where id = v_id
+      and images_used < pack_size
+    returning (pack_size - images_used) into v_remaining;
+
+    if not found then
+        return 0;  -- quota epuise (race perdue)
+    end if;
+
+    return coalesce(v_remaining, 0);
+end;
+$$;
+
+-- Helper : rembourser 1 image (rollback si la restoration backend a echoue).
+-- Idempotent : ne descend jamais en dessous de 0.
+create or replace function public.refund_pack_image(
+    p_user_id uuid default null,
+    p_device_id text default null
+) returns int
+language plpgsql
+security definer
+as $$
+declare
+    v_id bigint;
+    v_remaining int;
+begin
+    select id into v_id
+    from public.subscriptions
+    where is_premium = true
+      and (
+        (p_user_id is not null and user_id = p_user_id) or
+        (p_user_id is null and p_device_id is not null and device_id = p_device_id and user_id is null)
+      )
+      and pack_size is not null
+      and images_used > 0
+    order by expires_at desc nulls last  -- LIFO : rembourse le pack le plus recent
+    limit 1
+    for update;
+
+    if v_id is null then
+        return -1;
     end if;
 
     update public.subscriptions
-    set images_used = images_used + 1, updated_at = now()
-    where id = v_id;
+    set images_used = greatest(0, images_used - 1), updated_at = now()
+    where id = v_id
+    returning (pack_size - images_used) into v_remaining;
 
-    v_remaining := v_pack_size - v_used - 1;
-    return v_remaining;
+    return coalesce(v_remaining, 0);
 end;
 $$;
 

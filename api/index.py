@@ -98,9 +98,26 @@ def _user_id(request: Request) -> Optional[str]:
     return auth_service.user_id_from_token(token)
 
 
-# Header X-Premium accepte UNIQUEMENT en mode dev (gated par env)
+# Header X-Premium accepte UNIQUEMENT en mode dev (double garde-fou).
 # En prod, le statut premium vient EXCLUSIVEMENT de la table subscriptions.
-DEV_ALLOW_PREMIUM_HEADER = os.getenv("DEV_ALLOW_PREMIUM_HEADER", "0") == "1"
+# Garde-fou supplementaire (M1) : meme si l'env est mal configure, on refuse
+# le bypass si VERCEL_ENV=production ou ENV=prod (heuristique deploiement).
+def _dev_premium_header_allowed() -> bool:
+    if os.getenv("DEV_ALLOW_PREMIUM_HEADER", "0") != "1":
+        return False
+    deploy_env = (
+        os.getenv("VERCEL_ENV")
+        or os.getenv("ENV")
+        or os.getenv("ENVIRONMENT")
+        or ""
+    ).lower()
+    if deploy_env in ("production", "prod"):
+        log.error("DEV_ALLOW_PREMIUM_HEADER=1 ignore (env=%s)", deploy_env)
+        return False
+    return True
+
+
+DEV_ALLOW_PREMIUM_HEADER = _dev_premium_header_allowed()
 
 
 def _is_premium(
@@ -641,6 +658,38 @@ async def restore(
     log.info("Job %s : %d KB, ext=%s, device=%s, premium=%s",
              job_id, len(src_bytes) // 1024, ext, device_id, is_premium)
 
+    # SECURITE C2 (cost amplification) : on consomme le pack AVANT l'appel AI.
+    # Si la quota est epuisee a cet instant precis (race), on refuse.
+    # Si la restoration echoue plus tard, on rembourse via refund_pack_image.
+    pack_consumed = False
+    if is_premium and supabase.is_configured and (user_id or device_id):
+        try:
+            remaining = supabase.consume_pack_image(
+                user_id=user_id, device_id=device_id,
+            )
+        except Exception as exc:
+            log.warning("consume_pack_image failed (degraded): %s", exc)
+            remaining = -1
+        # remaining values:
+        #  -1 = pas de sub (legacy non-pack), continue normalement
+        #   0 = quota epuise (race perdue) -> refuse
+        # 99999 = legacy unlimited -> pas de pack a consommer
+        #  N>0 = consume reussi
+        if remaining == 0:
+            log.warning(
+                "Job %s : pack quota epuise (race) user=%s device=%s",
+                job_id, user_id, device_id,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "message": "Pack epuise. Achetez un nouveau pack pour continuer.",
+                    "reason": "pack_exhausted",
+                },
+            )
+        if remaining > 0 and remaining != 99999:
+            pack_consumed = True
+
     # Provider OpenAI gpt-image-1 reserve aux Premium (cout x10)
     effective_provider = provider
     if effective_provider == "openai" and not is_premium:
@@ -669,6 +718,14 @@ async def restore(
         )
     except Exception as exc:
         log.exception("Restoration failed")
+        # Refund le pack si consume avait reussi : la restoration a echoue,
+        # l'utilisateur ne doit pas perdre 1 photo de son quota.
+        if pack_consumed:
+            try:
+                supabase.refund_pack_image(user_id=user_id, device_id=device_id)
+                log.info("Job %s : pack refunded after restore failure", job_id)
+            except Exception as refund_exc:
+                log.warning("refund failed (degraded): %s", refund_exc)
         raise HTTPException(status_code=500, detail=f"Echec restauration: {exc}")
     elapsed_ms = int((time.time() - t0) * 1000)
     log.info("Job %s : done in %d ms (%d KB)", job_id, elapsed_ms, len(restored_bytes) // 1024)
@@ -681,17 +738,8 @@ async def restore(
             log.warning("watermark skipped: %s", exc)
 
     # Enregistrer l'utilisation (memory fallback ; Supabase logge via log_restoration)
+    # Note: la consommation du pack a deja ete faite en amont (cf. C2 fix).
     quota_service.record(device_id=device_id, user_id=user_id)
-
-    # Si premium avec un pack, decremente le quota du pack
-    if is_premium and supabase.is_configured and (user_id or device_id):
-        try:
-            remaining = supabase.consume_pack_image(
-                user_id=user_id, device_id=device_id,
-            )
-            log.info("pack consume job=%s remaining=%s", job_id, remaining)
-        except Exception as exc:
-            log.warning("pack consume failed (non bloquant): %s", exc)
 
     # --- Stockage ---
     before_url = after_url = None

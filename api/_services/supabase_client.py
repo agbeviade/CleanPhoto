@@ -238,6 +238,36 @@ class SupabaseClient:
             log.warning("consume_pack_image failed: %s", exc)
             return -1
 
+    def refund_pack_image(
+        self,
+        user_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> int:
+        """Rembourse 1 image consommee (rollback en cas d'erreur de restauration).
+
+        Returns:
+            -1 si aucune sub active trouvee
+            N >= 0 nombre d'images restantes apres remboursement
+        """
+        if not self._client:
+            return -1
+        if not user_id and not device_id:
+            return -1
+        try:
+            res = self._client.rpc("refund_pack_image", {
+                "p_user_id": user_id,
+                "p_device_id": device_id,
+            }).execute()
+            data = res.data
+            if isinstance(data, list) and data:
+                return int(data[0])
+            if isinstance(data, (int, float)):
+                return int(data)
+            return -1
+        except Exception as exc:
+            log.warning("refund_pack_image failed: %s", exc)
+            return -1
+
     def set_premium_device(
         self,
         device_id: str,
