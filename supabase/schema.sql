@@ -175,6 +175,130 @@ begin
     end if;
 end $$;
 
+-- 4ter. Migration : ajout du systeme de packs hebdomadaires
+-- Chaque pack a une taille (nombre d'images) et un quota consomme.
+-- pack_size IS NULL = abonnement legacy illimite (compat retro)
+alter table public.subscriptions add column if not exists pack_size int;
+alter table public.subscriptions add column if not exists images_used int default 0;
+
+-- Helper : marquer un user/device premium AVEC pack (replace v1 helpers)
+-- Si nouveau pack achete, on reset images_used a 0.
+create or replace function public.set_premium_user(
+    p_user_id uuid,
+    p_plan text default 'pack_10_week',
+    p_expires_at timestamptz default null,
+    p_provider text default 'geniuspay',
+    p_receipt text default null,
+    p_pack_size int default null
+) returns void
+language plpgsql
+security definer
+as $$
+begin
+    insert into public.subscriptions (
+      user_id, is_premium, plan, expires_at, provider, receipt,
+      pack_size, images_used, updated_at
+    )
+    values (
+      p_user_id, true, p_plan, p_expires_at, p_provider, p_receipt,
+      p_pack_size, 0, now()
+    )
+    on conflict (user_id) do update set
+        is_premium = true,
+        plan = excluded.plan,
+        expires_at = excluded.expires_at,
+        provider = excluded.provider,
+        receipt = excluded.receipt,
+        pack_size = excluded.pack_size,
+        images_used = 0,  -- reset compteur a chaque nouveau pack
+        updated_at = now();
+end;
+$$;
+
+create or replace function public.set_premium_device(
+    p_device_id text,
+    p_plan text default 'pack_10_week',
+    p_expires_at timestamptz default null,
+    p_provider text default 'geniuspay',
+    p_receipt text default null,
+    p_pack_size int default null
+) returns void
+language plpgsql
+security definer
+as $$
+begin
+    insert into public.subscriptions (
+      device_id, is_premium, plan, expires_at, provider, receipt,
+      pack_size, images_used, updated_at
+    )
+    values (
+      p_device_id, true, p_plan, p_expires_at, p_provider, p_receipt,
+      p_pack_size, 0, now()
+    )
+    on conflict (device_id) where device_id is not null and user_id is null
+    do update set
+        is_premium = true,
+        plan = excluded.plan,
+        expires_at = excluded.expires_at,
+        provider = excluded.provider,
+        receipt = excluded.receipt,
+        pack_size = excluded.pack_size,
+        images_used = 0,
+        updated_at = now();
+end;
+$$;
+
+-- Helper : consommer 1 image d'un pack actif (FIFO sur expires_at).
+-- Retourne le nombre d'images restantes dans le pack apres consommation,
+-- ou -1 si aucun pack disponible (legacy unlimited renvoie 99999).
+create or replace function public.consume_pack_image(
+    p_user_id uuid default null,
+    p_device_id text default null
+) returns int
+language plpgsql
+security definer
+as $$
+declare
+    v_id bigint;
+    v_pack_size int;
+    v_used int;
+    v_remaining int;
+begin
+    -- Recherche la sub active pour cet user ou device
+    select id, pack_size, images_used into v_id, v_pack_size, v_used
+    from public.subscriptions
+    where is_premium = true
+      and (
+        (p_user_id is not null and user_id = p_user_id) or
+        (p_user_id is null and p_device_id is not null and device_id = p_device_id and user_id is null)
+      )
+      and (expires_at is null or expires_at > now())
+    order by expires_at asc nulls last
+    limit 1;
+
+    if v_id is null then
+        return -1;  -- pas de sub active
+    end if;
+
+    -- Legacy unlimited (pack_size NULL) : pas de decrement, illimite
+    if v_pack_size is null then
+        return 99999;
+    end if;
+
+    -- Quota epuise
+    if v_used >= v_pack_size then
+        return 0;
+    end if;
+
+    update public.subscriptions
+    set images_used = images_used + 1, updated_at = now()
+    where id = v_id;
+
+    v_remaining := v_pack_size - v_used - 1;
+    return v_remaining;
+end;
+$$;
+
 -- 4bis. Table des paiements (GeniusPay - tracking + idempotency)
 -- Chaque ligne = une transaction GeniusPay. Idempotency par reference (unique).
 -- Le webhook met a jour le status et active la subscription quand status=success.

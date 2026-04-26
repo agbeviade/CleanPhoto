@@ -135,43 +135,122 @@ class SupabaseClient:
             return False
         if not user_id and not device_id:
             return False
+        info = self.get_subscription_info(user_id=user_id, device_id=device_id)
+        return bool(info and info.get("is_premium"))
+
+    def get_subscription_info(
+        self,
+        user_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Retourne les details de la subscription active (ou None si aucune).
+
+        Format retourne :
+            {
+              "is_premium": bool,        # actif (non expire ET quota dispo)
+              "plan": str,               # 'pack_10_week', 'pack_50_week', etc.
+              "pack_size": int|None,     # None = legacy unlimited
+              "images_used": int,
+              "remaining": int|None,     # None si unlimited, 0 si epuise
+              "expires_at": str|None,
+            }
+        """
+        if not self._client:
+            return None
+        if not user_id and not device_id:
+            return None
         try:
-            q = self._client.table("subscriptions").select("is_premium, expires_at")
+            q = self._client.table("subscriptions").select(
+                "is_premium, plan, expires_at, pack_size, images_used"
+            )
             if user_id:
                 q = q.eq("user_id", user_id)
             else:
-                # Cherche un abonnement device anonyme (user_id null)
                 q = q.eq("device_id", device_id).is_("user_id", "null")
             res = q.limit(1).execute()
             rows = res.data or []
             if not rows:
-                return False
+                return None
             row = rows[0]
-            if not row.get("is_premium"):
-                return False
+            is_premium = bool(row.get("is_premium"))
             expires_at = row.get("expires_at")
+            pack_size = row.get("pack_size")
+            images_used = int(row.get("images_used") or 0)
+
+            # Verifie expiration
             if expires_at:
                 from datetime import datetime, timezone
                 try:
                     dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
                     if dt < datetime.now(timezone.utc):
-                        return False  # Abonnement expire
+                        is_premium = False
                 except Exception:
                     pass
-            return True
+
+            # Verifie quota du pack
+            remaining = None
+            if pack_size is not None:
+                remaining = max(0, pack_size - images_used)
+                if remaining <= 0:
+                    is_premium = False  # quota epuise = plus premium
+
+            return {
+                "is_premium": is_premium,
+                "plan": row.get("plan"),
+                "pack_size": pack_size,
+                "images_used": images_used,
+                "remaining": remaining,
+                "expires_at": expires_at,
+            }
         except Exception as exc:
-            log.warning("get_premium_status failed: %s", exc)
-            return False
+            log.warning("get_subscription_info failed: %s", exc)
+            return None
+
+    def consume_pack_image(
+        self,
+        user_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> int:
+        """Consomme 1 image du pack actif. Retourne le nombre restant.
+
+        Returns:
+            -1 si aucun pack actif
+            0 si quota epuise (rien decrementer)
+            99999 si pack legacy unlimited
+            N >= 0 nombre d'images restantes apres decrement
+        """
+        if not self._client:
+            return -1
+        if not user_id and not device_id:
+            return -1
+        try:
+            res = self._client.rpc("consume_pack_image", {
+                "p_user_id": user_id,
+                "p_device_id": device_id,
+            }).execute()
+            data = res.data
+            if isinstance(data, list) and data:
+                return int(data[0])
+            if isinstance(data, (int, float)):
+                return int(data)
+            return -1
+        except Exception as exc:
+            log.warning("consume_pack_image failed: %s", exc)
+            return -1
 
     def set_premium_device(
         self,
         device_id: str,
-        plan: str = "monthly",
+        plan: str = "pack_10_week",
         expires_at: Optional[str] = None,
-        provider: str = "iap_apple",
+        provider: str = "geniuspay",
         receipt: Optional[str] = None,
+        pack_size: Optional[int] = None,
     ) -> bool:
-        """Marque un device comme premium (BGMaster style, sans login)."""
+        """Marque un device comme premium (BGMaster style, sans login).
+
+        pack_size : nombre d'images du pack achete (None = legacy unlimited).
+        """
         if not self._client or not device_id:
             return False
         try:
@@ -181,6 +260,7 @@ class SupabaseClient:
                 "p_expires_at": expires_at,
                 "p_provider": provider,
                 "p_receipt": receipt,
+                "p_pack_size": pack_size,
             }).execute()
             return True
         except Exception as exc:
@@ -190,12 +270,13 @@ class SupabaseClient:
     def set_premium_user(
         self,
         user_id: str,
-        plan: str = "monthly",
+        plan: str = "pack_10_week",
         expires_at: Optional[str] = None,
-        provider: str = "manual",
+        provider: str = "geniuspay",
         receipt: Optional[str] = None,
+        pack_size: Optional[int] = None,
     ) -> bool:
-        """Marque un user comme premium (apres webhook RevenueCat/Stripe)."""
+        """Marque un user comme premium (apres webhook GeniusPay)."""
         if not self._client or not user_id:
             return False
         try:
@@ -205,6 +286,7 @@ class SupabaseClient:
                 "p_expires_at": expires_at,
                 "p_provider": provider,
                 "p_receipt": receipt,
+                "p_pack_size": pack_size,
             }).execute()
             return True
         except Exception as exc:

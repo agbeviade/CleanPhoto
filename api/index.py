@@ -54,10 +54,33 @@ quota_service = QuotaService(supabase)
 auth_service = AuthService.from_env()
 geniuspay = GeniusPayClient.from_env()
 
-# Premium pricing (FCFA, mensuel manuel par defaut)
-PREMIUM_PRICE_XOF = int(os.getenv("PREMIUM_PRICE_XOF", "2999"))
-PREMIUM_PLAN = os.getenv("PREMIUM_PLAN", "monthly")  # monthly | lifetime
-PREMIUM_DURATION_DAYS = int(os.getenv("PREMIUM_DURATION_DAYS", "30"))
+# Catalogue de plans (packs hebdomadaires).
+# Chaque pack = N images sur 7 jours. Override possible via env (JSON).
+# Format env PACK_CATALOG_JSON : voir _default_packs() ci-dessous.
+def _default_packs() -> dict:
+    return {
+        "pack_10_week":  {"images": 10,  "price": 1499, "days": 7,
+                          "label": "10 photos / semaine"},
+        "pack_50_week":  {"images": 50,  "price": 2999, "days": 7,
+                          "label": "50 photos / semaine"},
+        "pack_100_week": {"images": 100, "price": 4999, "days": 7,
+                          "label": "100 photos / semaine"},
+    }
+
+
+def _load_pack_catalog() -> dict:
+    raw = os.getenv("PACK_CATALOG_JSON")
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and data:
+                return data
+        except Exception as exc:
+            log.warning("PACK_CATALOG_JSON invalide, fallback default: %s", exc)
+    return _default_packs()
+
+
+PACK_CATALOG: dict = _load_pack_catalog()
 # Rate-limit anti-spam sur /api/payments/create
 PAYMENTS_RATE_LIMIT_PER_10MIN = int(os.getenv("PAYMENTS_RATE_LIMIT_PER_10MIN", "5"))
 
@@ -127,15 +150,40 @@ def health():
     }
 
 
+@app.get("/api/plans")
+def plans():
+    """Retourne le catalogue de packs disponibles a l'achat.
+
+    Reponse :
+        {
+          "currency": "XOF",
+          "plans": {
+            "pack_10_week":  {"images":10,"price":1499,"days":7,"label":"..."},
+            ...
+          }
+        }
+    """
+    return {"currency": "XOF", "plans": PACK_CATALOG}
+
+
 @app.get("/api/quota")
 def quota(request: Request):
-    """Retourne le quota restant pour l'utilisateur (user_id si auth, sinon device)."""
+    """Retourne le quota restant pour l'utilisateur (user_id si auth, sinon device).
+
+    Si l'utilisateur a un pack actif, expose pack_size, images_used, remaining,
+    expires_at en plus du quota free quotidien.
+    """
     device_id = _device_id(request)
     user_id = _user_id(request)
     is_premium = _is_premium(request, user_id=user_id, device_id=device_id)
     allowed, info = quota_service.check(
         device_id=device_id, is_premium=is_premium, user_id=user_id,
     )
+    # Si premium, expose le detail de la subscription (pack_size, etc.)
+    if is_premium and supabase.is_configured:
+        sub = supabase.get_subscription_info(user_id=user_id, device_id=device_id)
+        if sub:
+            info["subscription"] = sub
     return {"allowed": allowed, **info}
 
 
@@ -205,10 +253,10 @@ async def iap_verify(request: Request):
 
 @app.post("/api/payments/create")
 async def payments_create(request: Request):
-    """Initie un paiement Premium via GeniusPay.
+    """Initie un paiement Premium via GeniusPay (pack hebdomadaire).
 
-    Body JSON optionnel: {plan?: 'monthly'|'lifetime', success_url?, error_url?}
-    Sinon utilise les defauts (PREMIUM_PLAN env, PREMIUM_PRICE_XOF env).
+    Body JSON requis: {plan: 'pack_10_week'|'pack_50_week'|'pack_100_week', success_url?, error_url?}
+    Le catalogue est expose via GET /api/plans.
 
     Headers requis: X-Device-Id (mode anonyme) ou Authorization (auth).
 
@@ -258,19 +306,25 @@ async def payments_create(request: Request):
     except Exception:
         body = {}
 
-    plan = (body.get("plan") or PREMIUM_PLAN).lower()
-    if plan not in ("monthly", "lifetime"):
-        raise HTTPException(status_code=400, detail="plan invalide")
+    plan = (body.get("plan") or "").strip().lower()
+    pack = PACK_CATALOG.get(plan)
+    if not pack:
+        raise HTTPException(
+            status_code=400,
+            detail=f"plan invalide. Valeurs acceptees: {list(PACK_CATALOG.keys())}",
+        )
+
+    amount = int(pack["price"])
+    days = int(pack["days"])
+    images = int(pack["images"])
 
     success_url = body.get("success_url")
     error_url = body.get("error_url")
 
-    description = (
-        "Souvenir AI - Premium a vie" if plan == "lifetime"
-        else "Souvenir AI - Premium 30 jours"
-    )
+    description = f"Souvenir AI - {pack.get('label', plan)} ({images} photos / {days}j)"
     metadata = {
         "plan": plan,
+        "pack_size": images,
         "device_id": device_id or "",
         "user_id": user_id or "",
         "app": "souvenir",
@@ -278,7 +332,7 @@ async def payments_create(request: Request):
 
     try:
         data = geniuspay.create_payment(
-            amount=PREMIUM_PRICE_XOF,
+            amount=amount,
             currency="XOF",
             description=description,
             success_url=success_url,
@@ -300,7 +354,7 @@ async def payments_create(request: Request):
     # Persiste le paiement (status pending)
     supabase.insert_payment(
         reference=reference,
-        amount=PREMIUM_PRICE_XOF,
+        amount=amount,
         plan=plan,
         device_id=device_id,
         user_id=user_id,
@@ -312,10 +366,11 @@ async def payments_create(request: Request):
     return {
         "reference": reference,
         "checkout_url": checkout_url,
-        "amount": PREMIUM_PRICE_XOF,
+        "amount": amount,
         "currency": "XOF",
         "plan": plan,
-        "expires_in_days": (PREMIUM_DURATION_DAYS if plan == "monthly" else None),
+        "pack_size": images,
+        "expires_in_days": days,
         "status": data.get("status", "pending"),
     }
 
@@ -418,7 +473,7 @@ async def payments_webhook(request: Request):
         # Recupere le contexte (device_id / user_id / plan) depuis notre row pending
         device_id = existing.get("device_id")
         user_id = existing.get("user_id")
-        plan = existing.get("plan") or PREMIUM_PLAN
+        plan = existing.get("plan") or "pack_10_week"
         # Fallback metadata GeniusPay UNIQUEMENT si la row pending est incomplete
         # (ne pas faire confiance au webhook pour le device/user, c'est notre row
         # initiale qui est la source de verite)
@@ -427,13 +482,14 @@ async def payments_webhook(request: Request):
             device_id = meta.get("device_id") or None
             user_id = meta.get("user_id") or None
 
-        # Calcul expires_at
-        expires_at = None
-        if plan == "monthly":
-            from datetime import datetime, timedelta, timezone
-            expires_at = (
-                datetime.now(timezone.utc) + timedelta(days=PREMIUM_DURATION_DAYS)
-            ).isoformat()
+        # Calcule expires_at + pack_size depuis le catalogue
+        pack = PACK_CATALOG.get(plan, PACK_CATALOG.get("pack_10_week"))
+        days = int(pack.get("days", 7)) if pack else 7
+        pack_size = int(pack.get("images", 10)) if pack else None
+        from datetime import datetime, timedelta, timezone
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(days=days)
+        ).isoformat()
 
         # Active premium (user_id prioritaire, sinon device_id)
         ok = False
@@ -441,11 +497,13 @@ async def payments_webhook(request: Request):
             ok = supabase.set_premium_user(
                 user_id=user_id, plan=plan, expires_at=expires_at,
                 provider="geniuspay", receipt=reference,
+                pack_size=pack_size,
             )
         elif device_id:
             ok = supabase.set_premium_device(
                 device_id=device_id, plan=plan, expires_at=expires_at,
                 provider="geniuspay", receipt=reference,
+                pack_size=pack_size,
             )
         else:
             log.error("webhook success mais ni user_id ni device_id (ref=%s)",
@@ -624,6 +682,16 @@ async def restore(
 
     # Enregistrer l'utilisation (memory fallback ; Supabase logge via log_restoration)
     quota_service.record(device_id=device_id, user_id=user_id)
+
+    # Si premium avec un pack, decremente le quota du pack
+    if is_premium and supabase.is_configured and (user_id or device_id):
+        try:
+            remaining = supabase.consume_pack_image(
+                user_id=user_id, device_id=device_id,
+            )
+            log.info("pack consume job=%s remaining=%s", job_id, remaining)
+        except Exception as exc:
+            log.warning("pack consume failed (non bloquant): %s", exc)
 
     # --- Stockage ---
     before_url = after_url = None
