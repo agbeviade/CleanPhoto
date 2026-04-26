@@ -46,6 +46,9 @@ class RestoreService:
         self._pipeline = ReplicatePipeline.from_env()
         self._flux = FluxKontextProvider.from_env()
         self._openai = OpenAIProvider.from_env()
+        # Classifier auto (gpt-4o-mini Vision) : adapte le prompt par type de photo
+        from .photo_classifier import PhotoClassifier
+        self._classifier = PhotoClassifier.from_env()
         # Flux Kontext active par defaut comme moteur principal de restauration
         self.use_flux = os.getenv("USE_FLUX", "1") == "1"
         # Pipeline multi-modeles utilise en fallback si Flux echoue
@@ -108,6 +111,54 @@ class RestoreService:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def classify_and_select_prompt(
+        self,
+        src_bytes: bytes,
+        user_prompt: Optional[str] = None,
+    ) -> dict:
+        """Detecte le type de photo et choisit le prompt adapte.
+
+        Si user_prompt est fourni, on bypass la classification (l'utilisateur
+        a fait son choix). Sinon on appelle gpt-4o-mini Vision et on map vers
+        le prompt specialise.
+
+        Returns:
+            {
+              "prompt": str | None,        # prompt final a passer au provider
+              "category": str,             # face_portrait / landscape / ...
+              "label": str,                # libelle UI ("Portrait individuel")
+              "classification": dict,      # meta brute du classifier
+            }
+        """
+        from .category_prompts import get_prompt_for_category, get_label
+
+        # User a fourni un prompt explicite -> on respecte
+        if user_prompt:
+            return {
+                "prompt": user_prompt,
+                "category": "user_override",
+                "label": "Prompt personnalise",
+                "classification": {"skipped": "user_override"},
+            }
+
+        # Classifier non configure -> on laisse le DEFAULT du provider
+        if not self._classifier.is_configured:
+            return {
+                "prompt": None,
+                "category": "unknown",
+                "label": get_label("unknown"),
+                "classification": {"skipped": "classifier_disabled"},
+            }
+
+        meta = self._classifier.classify(src_bytes)
+        category = meta.get("category", "unknown")
+        return {
+            "prompt": get_prompt_for_category(category),
+            "category": category,
+            "label": get_label(category),
+            "classification": meta,
+        }
+
     def restore_bytes(
         self,
         src_bytes: bytes,

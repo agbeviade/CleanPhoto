@@ -802,6 +802,19 @@ async def restore(
         elif c in ("off", "false", "0", "no"):
             colorize_arg = False
 
+    # --- Classification automatique du type de photo ---
+    # Choisit le prompt adapte (portrait/groupe/paysage/document/objet).
+    # Non-bloquant : fallback "unknown" + DEFAULT_PROMPT si echec.
+    classification = restore_service.classify_and_select_prompt(
+        src_bytes, user_prompt=prompt,
+    )
+    adapted_prompt = classification["prompt"]
+    detected_category = classification["category"]
+    log.info(
+        "Job %s : detected category=%s (label=%s)",
+        job_id, detected_category, classification["label"],
+    )
+
     t0 = time.time()
     try:
         restored_bytes = restore_service.restore_bytes(
@@ -809,7 +822,7 @@ async def restore(
             fidelity=fidelity,
             upscale=upscale,
             provider=effective_provider,
-            prompt=prompt,
+            prompt=adapted_prompt,
             quality=quality,
             colorize=colorize_arg,
             is_premium=is_premium,
@@ -897,6 +910,8 @@ async def restore(
                 "X-Quota-Used": str(q_after.get("used", 0)),
                 "X-Quota-Remaining": str(q_after.get("remaining", -1)),
                 "X-Premium": "1" if is_premium else "0",
+                "X-Detected-Category": detected_category,
+                "X-Detected-Label": classification["label"],
             },
         )
 
@@ -912,6 +927,8 @@ async def restore(
         "pipeline": restore_service.pipeline_info()["mode"],
         "quota": q_after,
         "is_premium": is_premium,
+        "detected_category": detected_category,
+        "detected_label": classification["label"],
     })
 
 
