@@ -449,3 +449,101 @@ class SupabaseClient:
         except Exception as exc:
             log.warning("get_global_count_24h failed: %s", exc)
             return 0
+
+    # ------------------------------------------------------------------
+    # Admin stats (dashboard solo founder)
+    # ------------------------------------------------------------------
+    def admin_stats(self) -> dict:
+        """Snapshot global pour /api/admin/stats.
+
+        Retourne:
+          {
+            "today": {revenue_xof, payments_completed, payments_failed,
+                      payments_suspicious, restorations, errors_estimated},
+            "subscriptions": {active, by_plan, total_remaining_images},
+            "all_time": {total_revenue_xof, total_payments, total_restorations}
+          }
+        """
+        out: dict = {"today": {}, "subscriptions": {}, "all_time": {}}
+        if not self._client:
+            return out
+        try:
+            from datetime import datetime, timedelta, timezone
+            now = datetime.now(timezone.utc)
+            since_24h = (now - timedelta(hours=24)).isoformat()
+
+            # --- Today (24h) ---
+            payments_today = self._client.table("payments").select(
+                "amount, status"
+            ).gte("created_at", since_24h).execute().data or []
+
+            revenue_today = sum(
+                int(p.get("amount") or 0) for p in payments_today
+                if p.get("status") == "completed"
+            )
+            completed_today = sum(1 for p in payments_today if p.get("status") == "completed")
+            failed_today = sum(1 for p in payments_today if p.get("status") == "failed")
+            suspicious_today = sum(1 for p in payments_today if p.get("status") == "suspicious")
+
+            restorations_today = (
+                self._client.table("restorations")
+                .select("id", count="exact")
+                .gte("created_at", since_24h)
+                .execute().count or 0
+            )
+
+            out["today"] = {
+                "revenue_xof": revenue_today,
+                "payments_completed": completed_today,
+                "payments_failed": failed_today,
+                "payments_suspicious": suspicious_today,
+                "restorations": restorations_today,
+                # Estimation cout Replicate : ~$0.005 / call (CodeFormer)
+                "estimated_replicate_cost_usd": round(restorations_today * 0.005, 2),
+            }
+
+            # --- Subscriptions actives ---
+            subs = self._client.table("subscriptions").select(
+                "plan, pack_size, images_used, expires_at, is_premium"
+            ).eq("is_premium", True).execute().data or []
+            now_iso = now.isoformat()
+            active_subs = [
+                s for s in subs
+                if not s.get("expires_at") or s["expires_at"] > now_iso
+            ]
+            by_plan: dict = {}
+            total_remaining = 0
+            for s in active_subs:
+                plan = s.get("plan") or "unknown"
+                by_plan[plan] = by_plan.get(plan, 0) + 1
+                ps = s.get("pack_size")
+                if ps is not None:
+                    total_remaining += max(0, ps - int(s.get("images_used") or 0))
+
+            out["subscriptions"] = {
+                "active": len(active_subs),
+                "by_plan": by_plan,
+                "total_remaining_images": total_remaining,
+            }
+
+            # --- All time ---
+            all_payments = self._client.table("payments").select(
+                "amount", count="exact"
+            ).eq("status", "completed").execute()
+            total_revenue = sum(
+                int(p.get("amount") or 0) for p in (all_payments.data or [])
+            )
+            total_restorations = (
+                self._client.table("restorations")
+                .select("id", count="exact")
+                .execute().count or 0
+            )
+            out["all_time"] = {
+                "total_revenue_xof": total_revenue,
+                "total_payments": all_payments.count or 0,
+                "total_restorations": total_restorations,
+            }
+        except Exception as exc:
+            log.warning("admin_stats failed: %s", exc)
+            out["error"] = str(exc)
+        return out

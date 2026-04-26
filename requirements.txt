@@ -6,3 +6,6 @@ numpy==1.26.4
 supabase==2.8.1
 pydantic==2.9.2
 requests==2.32.3
+# Monitoring opt-in : si SENTRY_DSN est defini en env, le SDK est utilise.
+# Si non defini, aucun cout (l'import echoue silencieusement).
+sentry-sdk[fastapi]==2.18.0

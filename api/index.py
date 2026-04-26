@@ -30,6 +30,7 @@ from ._services.quota_service import QuotaService, DAILY_FREE_LIMIT
 from ._services.watermark import add_watermark
 from ._services.auth_service import AuthService
 from ._services.geniuspay_client import GeniusPayClient
+from ._services.notifier import CriticalNotifier
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("souvenir")
@@ -53,6 +54,24 @@ supabase = SupabaseClient.from_env()
 quota_service = QuotaService(supabase)
 auth_service = AuthService.from_env()
 geniuspay = GeniusPayClient.from_env()
+notifier = CriticalNotifier.from_env()
+# Sentry (opt-in via env). Aucun cout si SENTRY_DSN non defini.
+_sentry_dsn = os.getenv("SENTRY_DSN")
+if _sentry_dsn:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1")),
+            environment=os.getenv("VERCEL_ENV") or os.getenv("ENV") or "production",
+            integrations=[FastApiIntegration()],
+        )
+        log.info("Sentry initialise (env=%s)", os.getenv("VERCEL_ENV", "?"))
+    except ImportError:
+        log.warning("SENTRY_DSN defini mais sentry-sdk non installe")
+    except Exception as exc:
+        log.warning("Sentry init failed: %s", exc)
 
 # Catalogue de plans (packs hebdomadaires).
 # Chaque pack = N images sur 7 jours. Override possible via env (JSON).
@@ -165,6 +184,47 @@ def health():
         "supabase": supabase.is_configured,
         "daily_free_limit": DAILY_FREE_LIMIT,
     }
+
+
+def _verify_admin(request: Request) -> bool:
+    """Verifie le token admin (header X-Admin-Token).
+
+    Comparaison constante (anti timing-attack). Refuse si ADMIN_TOKEN non
+    configure cote serveur (=> impossible d'acceder a /api/admin/*).
+    """
+    expected = os.getenv("ADMIN_TOKEN", "")
+    if not expected or len(expected) < 16:
+        return False
+    received = request.headers.get("X-Admin-Token") or ""
+    if not received:
+        return False
+    import hmac as _hmac
+    return _hmac.compare_digest(expected, received)
+
+
+@app.get("/api/admin/stats")
+def admin_stats(request: Request):
+    """Dashboard solo founder : revenus, packs actifs, conversions, couts.
+
+    Auth : header X-Admin-Token (env ADMIN_TOKEN, min 16 chars).
+    """
+    if not _verify_admin(request):
+        raise HTTPException(status_code=401, detail="Token admin requis")
+
+    if not supabase.is_configured:
+        return {"error": "Supabase non configure", "stats": None}
+
+    stats = supabase.admin_stats()
+    # Enrichit avec quelques infos runtime
+    stats["runtime"] = {
+        "pipeline": restore_service.pipeline_info(),
+        "supabase": supabase.is_configured,
+        "geniuspay": geniuspay.is_configured if hasattr(geniuspay, "is_configured") else None,
+        "notifier_configured": notifier.is_configured,
+        "sentry_enabled": bool(_sentry_dsn),
+        "catalog": PACK_CATALOG,
+    }
+    return stats
 
 
 @app.get("/api/plans")
@@ -439,6 +499,17 @@ async def payments_webhook(request: Request):
     event = request.headers.get("X-Webhook-Event") or ""
 
     if not geniuspay.verify_webhook(signature, timestamp, raw):
+        # Alerte critique : tentative de webhook forge ou mal configure
+        notifier.alert(
+            "Webhook signature invalide",
+            "Tentative de webhook GeniusPay avec signature/timestamp invalide.",
+            level="error",
+            context={
+                "ip": request.client.host if request.client else "?",
+                "event": event or "?",
+                "ts": timestamp or "?",
+            },
+        )
         raise HTTPException(status_code=401, detail="Signature invalide")
 
     try:
@@ -485,6 +556,18 @@ async def payments_webhook(request: Request):
             supabase.update_payment_status(
                 reference=reference, status="suspicious", raw_webhook=payload,
             )
+            notifier.alert(
+                "Tentative de fraude (montant)",
+                "Webhook recu avec un montant different de celui de la creation. "
+                "Le paiement est marque suspicious.",
+                level="critical",
+                context={
+                    "reference": reference,
+                    "expected_xof": expected_amount,
+                    "received_xof": received_amount,
+                },
+                dedupe=False,  # toujours notifier les fraudes
+            )
             raise HTTPException(status_code=400, detail="Montant invalide")
 
         # Recupere le contexte (device_id / user_id / plan) depuis notre row pending
@@ -525,6 +608,21 @@ async def payments_webhook(request: Request):
         else:
             log.error("webhook success mais ni user_id ni device_id (ref=%s)",
                       reference)
+
+        # Notification positive : nouveau paiement reussi (cha-ching!)
+        if ok:
+            notifier.alert(
+                f"Nouveau paiement : {expected_amount} F CFA",
+                f"Pack `{plan}` active pour {pack_size or 'unlimited'} photos.",
+                level="info",
+                context={
+                    "reference": reference,
+                    "plan": plan,
+                    "amount_xof": expected_amount,
+                    "scope": "user" if user_id else "device",
+                },
+                dedupe=False,  # chaque vente compte
+            )
 
         supabase.update_payment_status(
             reference=reference,
@@ -726,6 +824,18 @@ async def restore(
                 log.info("Job %s : pack refunded after restore failure", job_id)
             except Exception as refund_exc:
                 log.warning("refund failed (degraded): %s", refund_exc)
+        # Alerte (avec dedupe 60s pour eviter le flood en cas de panne provider)
+        notifier.alert(
+            "Echec restoration AI",
+            f"Job `{job_id}` : {type(exc).__name__}: {str(exc)[:200]}",
+            level="error",
+            context={
+                "job_id": job_id,
+                "premium": is_premium,
+                "size_kb": len(src_bytes) // 1024,
+                "provider": effective_provider or "auto",
+            },
+        )
         raise HTTPException(status_code=500, detail=f"Echec restauration: {exc}")
     elapsed_ms = int((time.time() - t0) * 1000)
     log.info("Job %s : done in %d ms (%d KB)", job_id, elapsed_ms, len(restored_bytes) // 1024)
