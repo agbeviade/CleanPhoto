@@ -90,6 +90,30 @@ class PaymentService {
     };
   }
 
+  /// Catalogue par defaut, affiche INSTANTANEMENT pendant que /api/plans
+  /// charge en arriere-plan (cold-start Vercel ~3-5s).
+  /// Doit rester synchronise avec backend/_services/payments.py DEFAULT_PACKS.
+  static const List<PackPlan> defaultPlans = [
+    PackPlan(
+        id: 'pack_10_week',
+        images: 10,
+        price: 1499,
+        days: 7,
+        label: '10 photos / semaine'),
+    PackPlan(
+        id: 'pack_50_week',
+        images: 50,
+        price: 2999,
+        days: 7,
+        label: '50 photos / semaine'),
+    PackPlan(
+        id: 'pack_100_week',
+        images: 100,
+        price: 4999,
+        days: 7,
+        label: '100 photos / semaine'),
+  ];
+
   /// Recupere le catalogue de packs disponibles a l'achat.
   /// Retourne null si erreur reseau.
   static Future<List<PackPlan>?> fetchPlans() async {

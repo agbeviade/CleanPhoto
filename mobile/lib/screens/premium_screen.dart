@@ -18,9 +18,11 @@ class PremiumScreen extends StatefulWidget {
 
 class _PremiumScreenState extends State<PremiumScreen> {
   bool _processing = false;
-  bool _loadingPlans = true;
-  List<PackPlan> _plans = [];
-  String? _selectedPlanId;
+  // false des le depart : on affiche immediatement les defauts hardcodes,
+  // puis on rafraichit depuis le serveur en arriere-plan (cf. _loadPlans).
+  bool _loadingPlans = false;
+  List<PackPlan> _plans = PaymentService.defaultPlans;
+  String? _selectedPlanId = 'pack_50_week';
   String? _loadError;
   // Sur iOS : map productId Apple -> ProductDetails (prix USD)
   Map<String, ProductDetails> _appleProducts = {};
@@ -57,28 +59,36 @@ class _PremiumScreenState extends State<PremiumScreen> {
   }
 
   Future<void> _loadPlans() async {
+    // 1. Affichage INSTANTANE du catalogue par defaut (hardcode, pas de spinner)
+    final defaults = PaymentService.defaultPlans;
+    final defaultPick = defaults.firstWhere(
+      (p) => p.id == 'pack_50_week',
+      orElse: () => defaults.first,
+    );
     setState(() {
-      _loadingPlans = true;
+      _plans = defaults;
+      _selectedPlanId ??= defaultPick.id;
+      _loadingPlans = false;
       _loadError = null;
     });
+
+    // 2. Fetch en arriere-plan, mise a jour si reussi (sans flicker)
     final list = await PaymentService.fetchPlans();
     if (!mounted) return;
     if (list == null || list.isEmpty) {
-      setState(() {
-        _loadingPlans = false;
-        _loadError = 'Impossible de charger les forfaits. Verifiez votre connexion.';
-      });
+      // Fetch echoue : on garde les defauts deja affiches
       return;
     }
+    // On preserve la selection si l'id existe encore dans la nouvelle liste
+    final preservedId = list.any((p) => p.id == _selectedPlanId)
+        ? _selectedPlanId
+        : list.firstWhere(
+            (p) => p.id == 'pack_50_week',
+            orElse: () => list.first,
+          ).id;
     setState(() {
       _plans = list;
-      // Plan recommande par defaut : 50 photos (rapport qualite-prix)
-      final defaultPick = list.firstWhere(
-        (p) => p.id == 'pack_50_week',
-        orElse: () => list.first,
-      );
-      _selectedPlanId = defaultPick.id;
-      _loadingPlans = false;
+      _selectedPlanId = preservedId;
     });
   }
 
