@@ -7,6 +7,7 @@ import '../services/payment_service.dart';
 import '../services/premium_service.dart';
 import '../services/iap_service.dart';
 import '../services/notification_service.dart';
+import 'checkout_webview_screen.dart';
 
 class PremiumScreen extends StatefulWidget {
   const PremiumScreen({super.key});
@@ -419,22 +420,45 @@ class _PremiumScreenState extends State<PremiumScreen> {
     }
   }
 
-  /// Flow GeniusPay (Android / autres).
+  /// Flow GeniusPay (Android / autres) avec WebView in-app.
+  /// L'utilisateur ne quitte JAMAIS l'app : la page de paiement s'ouvre
+  /// dans une WebView, qui se ferme automatiquement apres le paiement.
   Future<void> _startGeniusPayment(
       BuildContext context, PackPlan selected) async {
     setState(() => _processing = true);
     try {
       final init = await PaymentService.createPayment(plan: selected.id);
-      final ok = await PaymentService.openCheckout(init.checkoutUrl);
-      if (!ok) {
-        throw Exception('Impossible d\'ouvrir la page de paiement');
-      }
       if (!context.mounted) return;
 
-      // Affiche un dialog en attendant la confirmation webhook
-      _showWaitingDialog(context, init.reference);
+      // Ouvre la WebView in-app et attend le retour
+      final webResult = await Navigator.of(context).push<CheckoutResult>(
+        MaterialPageRoute(
+          builder: (_) => CheckoutWebViewScreen(
+            checkoutUrl: init.checkoutUrl,
+            successUrlPattern: PaymentService.successUrlPattern,
+            errorUrlPattern: PaymentService.errorUrlPattern,
+            reference: init.reference,
+          ),
+          fullscreenDialog: true,
+        ),
+      );
 
-      // Polling backend pour confirmer le paiement
+      if (!context.mounted) return;
+
+      // Si user a annule explicitement (URL error), inutile de poller
+      if (webResult == CheckoutResult.error) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Paiement annule.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
+
+      // Cas success ou closed : on confirme via le backend
+      // (le webhook GeniusPay arrive en parallele)
+      _showWaitingDialog(context, init.reference);
       final completed = await PaymentService.waitForCompletion(init.reference);
 
       if (!context.mounted) return;

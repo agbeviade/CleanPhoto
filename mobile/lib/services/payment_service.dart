@@ -112,24 +112,48 @@ class PaymentService {
     }
   }
 
+  /// URLs de callback que GeniusPay appellera apres le paiement.
+  /// La WebView in-app les intercepte AVANT chargement et ferme l'ecran.
+  /// On utilise des URLs basees sur apiBaseUrl (donc HTTPS valide) pour
+  /// que GeniusPay les accepte ; le backend n'a pas besoin d'exposer ces
+  /// endpoints (404 = OK, on intercepte avant).
+  static const String successUrlPattern = '/payment-return/success';
+  static const String errorUrlPattern = '/payment-return/error';
+
+  static String get _callbackBase {
+    final base = AppConfig.apiBaseUrl.endsWith('/')
+        ? AppConfig.apiBaseUrl.substring(0, AppConfig.apiBaseUrl.length - 1)
+        : AppConfig.apiBaseUrl;
+    return '$base/payment-return';
+  }
+
   /// Initie un paiement Premium.
   ///
   /// [plan] : id du pack (ex: 'pack_10_week', 'pack_50_week', 'pack_100_week').
+  /// [useInAppCallback] : si true (defaut), utilise les URLs de callback
+  /// interceptees par CheckoutWebViewScreen. Sinon, GeniusPay garde ses URLs
+  /// par defaut.
   static Future<PaymentInitResult> createPayment({
     String plan = 'pack_10_week',
+    bool useInAppCallback = true,
   }) async {
+    final body = <String, dynamic>{'plan': plan};
+    if (useInAppCallback) {
+      body['success_url'] = '$_callbackBase/success';
+      body['error_url'] = '$_callbackBase/error';
+    }
     final r = await http
         .post(
           _u('/api/payments/create'),
           headers: await _headers(),
-          body: jsonEncode({'plan': plan}),
+          body: jsonEncode(body),
         )
         .timeout(const Duration(seconds: 15));
     if (r.statusCode != 200) {
       throw Exception(_extractError(r));
     }
-    final body = jsonDecode(r.body) as Map<String, dynamic>;
-    return PaymentInitResult.fromJson(body);
+    final json = jsonDecode(r.body) as Map<String, dynamic>;
+    return PaymentInitResult.fromJson(json);
   }
 
   /// Ouvre la page de checkout GeniusPay (navigateur externe).
