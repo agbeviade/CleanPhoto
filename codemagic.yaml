@@ -66,3 +66,190 @@ workflows:
     artifacts:
       - mobile/build/**/outputs/**/*.apk
       - mobile/build/**/outputs/**/mapping.txt
+
+  # ===========================================================================
+  # iOS DEBUG (NON-SIGNE) - Build de validation, AUCUN compte Apple requis
+  # ===========================================================================
+  # Genere un .app non signe pour verifier que la compilation iOS fonctionne.
+  # Lance ce workflow en premier pour detecter les bugs Swift/Pod avant de
+  # payer 99 USD/an le compte Apple Developer.
+  ios-debug-unsigned:
+    name: Souvenir AI - iOS Debug (unsigned validation build)
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      flutter: 3.27.1
+      xcode: latest
+      cocoapods: default
+      vars:
+        API_BASE_URL: "https://clean-photo.vercel.app"
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: false  # Manuel uniquement (eviter de gaspiller les minutes)
+    scripts:
+      - name: Generate iOS scaffolding (idempotent)
+        working_directory: mobile
+        script: |
+          # Cree ios/ s'il n'existe pas, sinon ne fait rien
+          if [ ! -d "ios" ]; then
+            flutter create --project-name souvenir_ai --org ci.cleanphoto --platforms=ios .
+          fi
+          ls -la ios/
+
+      - name: Patch Info.plist (permissions iOS)
+        working_directory: mobile
+        script: |
+          PLIST=ios/Runner/Info.plist
+          # Permissions photo / camera (iOS 14+ exige des descriptions)
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryUsageDescription string 'Souvenir a besoin d acceder a vos photos pour les restaurer.'" $PLIST 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :NSPhotoLibraryUsageDescription 'Souvenir a besoin d acceder a vos photos pour les restaurer.'" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryAddUsageDescription string 'Souvenir enregistre les photos restaurees dans votre galerie.'" $PLIST 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :NSPhotoLibraryAddUsageDescription 'Souvenir enregistre les photos restaurees dans votre galerie.'" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'Pour prendre une nouvelle photo a restaurer.'" $PLIST 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription 'Pour prendre une nouvelle photo a restaurer.'" $PLIST
+          # url_launcher : whitelist des schemes externes
+          /usr/libexec/PlistBuddy -c "Add :LSApplicationQueriesSchemes array" $PLIST 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :LSApplicationQueriesSchemes:0 string https" $PLIST 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :LSApplicationQueriesSchemes:1 string http" $PLIST 2>/dev/null || true
+          echo "=== Info.plist final ==="
+          cat $PLIST
+
+      - name: Bump iOS deployment target to 13.0
+        working_directory: mobile/ios
+        script: |
+          # Certains plugins (flutter_secure_storage, image_picker) exigent iOS 13+
+          sed -i.bak -E "s/^# platform :ios, '.*'/platform :ios, '13.0'/" Podfile || true
+          sed -i.bak -E "s/^platform :ios, '.*'/platform :ios, '13.0'/" Podfile || true
+          # Si la ligne n'existe pas du tout, l'ajouter
+          if ! grep -q "platform :ios" Podfile; then
+            sed -i.bak "1i\\
+platform :ios, '13.0'
+" Podfile
+          fi
+          cat Podfile | head -5
+
+      - name: Get Flutter dependencies
+        working_directory: mobile
+        script: flutter pub get
+
+      - name: Pod install
+        working_directory: mobile/ios
+        script: |
+          pod repo update
+          pod install --repo-update
+
+      - name: Flutter analyze (non-blocking)
+        working_directory: mobile
+        script: flutter analyze --no-fatal-infos || true
+
+      - name: Build iOS (no codesign)
+        working_directory: mobile
+        script: |
+          flutter build ios --release --no-codesign \
+            --dart-define=API_BASE_URL=$API_BASE_URL \
+            --dart-define=SUPABASE_URL=${SUPABASE_URL:-} \
+            --dart-define=SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-}
+
+    artifacts:
+      - mobile/build/ios/iphoneos/*.app
+      - /tmp/xcodebuild_logs/*.log
+
+  # ===========================================================================
+  # iOS RELEASE APP STORE (signe) - Necessite compte Apple Developer
+  # ===========================================================================
+  # Avant d'activer ce workflow, dans Codemagic UI :
+  #   1. Teams > Integrations > App Store Connect > Add API key (.p8)
+  #   2. Code signing identities > iOS > "Fetch from App Store Connect"
+  #   3. Decommenter la section integrations + signing ci-dessous
+  ios-release-appstore:
+    name: Souvenir AI - iOS Release (App Store)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    # integrations:
+    #   app_store_connect: SOUVENIR_APP_STORE_KEY  # nom de la cle dans Codemagic
+    environment:
+      flutter: 3.27.1
+      xcode: latest
+      cocoapods: default
+      # ios_signing:
+      #   distribution_type: app_store
+      #   bundle_identifier: ci.cleanphoto.souvenirai
+      vars:
+        API_BASE_URL: "https://clean-photo.vercel.app"
+        APP_STORE_APPLE_ID: "TODO_NUMERIC_APP_ID"  # ex: 6478123456 (depuis App Store Connect)
+    triggering:
+      events: []  # Manuel uniquement
+    scripts:
+      - name: Generate iOS scaffolding (idempotent)
+        working_directory: mobile
+        script: |
+          if [ ! -d "ios" ]; then
+            flutter create --project-name souvenir_ai --org ci.cleanphoto --platforms=ios .
+          fi
+
+      - name: Patch Info.plist (permissions iOS)
+        working_directory: mobile
+        script: |
+          PLIST=ios/Runner/Info.plist
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryUsageDescription string 'Souvenir a besoin d acceder a vos photos pour les restaurer.'" $PLIST 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :NSPhotoLibraryUsageDescription 'Souvenir a besoin d acceder a vos photos pour les restaurer.'" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryAddUsageDescription string 'Souvenir enregistre les photos restaurees dans votre galerie.'" $PLIST 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :NSPhotoLibraryAddUsageDescription 'Souvenir enregistre les photos restaurees dans votre galerie.'" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'Pour prendre une nouvelle photo a restaurer.'" $PLIST 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription 'Pour prendre une nouvelle photo a restaurer.'" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :LSApplicationQueriesSchemes array" $PLIST 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :LSApplicationQueriesSchemes:0 string https" $PLIST 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :LSApplicationQueriesSchemes:1 string http" $PLIST 2>/dev/null || true
+
+      - name: Bump iOS deployment target to 13.0
+        working_directory: mobile/ios
+        script: |
+          sed -i.bak -E "s/^# platform :ios, '.*'/platform :ios, '13.0'/" Podfile || true
+          sed -i.bak -E "s/^platform :ios, '.*'/platform :ios, '13.0'/" Podfile || true
+          if ! grep -q "platform :ios" Podfile; then
+            sed -i.bak "1i\\
+platform :ios, '13.0'
+" Podfile
+          fi
+
+      - name: Get Flutter dependencies
+        working_directory: mobile
+        script: flutter pub get
+
+      - name: Pod install
+        working_directory: mobile/ios
+        script: |
+          pod repo update
+          pod install --repo-update
+
+      # Decommenter quand le compte Apple Developer est configure :
+      # - name: Set bundle id + version from CI
+      #   working_directory: mobile
+      #   script: |
+      #     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ci.cleanphoto.souvenirai" ios/Runner/Info.plist
+      #
+      # - name: Set up code signing
+      #   script: xcode-project use-profiles
+      #
+      # - name: Build IPA
+      #   working_directory: mobile
+      #   script: |
+      #     flutter build ipa --release \
+      #       --dart-define=API_BASE_URL=$API_BASE_URL \
+      #       --dart-define=SUPABASE_URL=${SUPABASE_URL:-} \
+      #       --dart-define=SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-} \
+      #       --export-options-plist=/Users/builder/export_options.plist
+
+    artifacts:
+      - mobile/build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    # publishing:
+    #   app_store_connect:
+    #     auth: integration
+    #     submit_to_testflight: true
+    #     beta_groups:
+    #       - Internal Testers
