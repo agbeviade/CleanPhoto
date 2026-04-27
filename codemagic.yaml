@@ -40,12 +40,29 @@ workflows:
           else
             sed -i.bak -E 's/ndkVersion[ =]+"[^"]+"/ndkVersion "27.0.12077973"/' android/app/build.gradle
           fi
+          # 4. Activer core library desugaring (requis par flutter_local_notifications)
+          #    On injecte coreLibraryDesugaringEnabled=true dans le bloc compileOptions
+          if ! grep -q 'coreLibraryDesugaringEnabled' android/app/build.gradle; then
+            sed -i.bak -E 's/(compileOptions \{)/\1\n        coreLibraryDesugaringEnabled true/' android/app/build.gradle
+          fi
+          # 5. Ajouter la dependance desugar_jdk_libs dans le bloc dependencies
+          if ! grep -q 'desugar_jdk_libs' android/app/build.gradle; then
+            if grep -qE '^dependencies \{' android/app/build.gradle; then
+              # Bloc existant : on insere la ligne juste apres
+              sed -i.bak -E 's/(^dependencies \{)/\1\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.4"/' android/app/build.gradle
+            else
+              # Pas de bloc : on l'ajoute en fin de fichier
+              printf '\ndependencies {\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.4"\n}\n' >> android/app/build.gradle
+            fi
+          fi
           echo "=== gradle-wrapper.properties ==="
           cat android/gradle/wrapper/gradle-wrapper.properties
           echo "=== settings.gradle ==="
           cat android/settings.gradle
-          echo "=== app/build.gradle (10 first lines of android block) ==="
-          grep -A 10 '^android {' android/app/build.gradle | head -15
+          echo "=== app/build.gradle (android block) ==="
+          grep -A 20 '^android {' android/app/build.gradle | head -30
+          echo "=== app/build.gradle (dependencies) ==="
+          grep -A 5 '^dependencies' android/app/build.gradle | head -10
 
       - name: Get Flutter dependencies
         working_directory: mobile
