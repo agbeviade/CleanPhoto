@@ -152,29 +152,30 @@ class _ResultScreenState extends State<ResultScreen> {
                 runSpacing: 8,
                 alignment: WrapAlignment.center,
                 children: [
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: AppColors.softBlue.withOpacity(0.5),
-                      borderRadius: BorderRadius.circular(10),
+                  if (widget.processingMs > 0)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: AppColors.softBlue.withOpacity(0.5),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.auto_awesome,
+                              color: AppColors.primaryBlue, size: 16),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Restauration en ${(widget.processingMs / 1000).toStringAsFixed(1)} s',
+                            style: const TextStyle(
+                                color: AppColors.primaryBlue,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 12),
+                          ),
+                        ],
+                      ),
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.auto_awesome,
-                            color: AppColors.primaryBlue, size: 16),
-                        const SizedBox(width: 6),
-                        Text(
-                          'Restauration en ${(widget.processingMs / 1000).toStringAsFixed(1)} s',
-                          style: const TextStyle(
-                              color: AppColors.primaryBlue,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  ),
                   if (_categoryBadge() != null) _categoryBadge()!,
                 ],
               ),

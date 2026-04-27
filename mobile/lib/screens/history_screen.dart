@@ -1,14 +1,18 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart' as intl;
+import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../theme.dart';
 import '../services/history_service.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
-import '../widgets/before_after_slider.dart';
 import 'auth_screen.dart';
+import 'result_screen.dart';
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
@@ -269,13 +273,20 @@ class _HistoryScreenState extends State<HistoryScreen>
                   Text(
                     e.pipeline != null
                         ? 'Mode: ${e.pipeline} - ${e.processingMs ?? 0} ms'
-                        : 'Touchez pour comparer',
+                        : 'Touchez pour comparer / partager',
                     style: const TextStyle(
                         color: AppColors.textMuted, fontSize: 12),
                   ),
                 ],
               ),
             ),
+            if (e.afterUrl != null)
+              IconButton(
+                tooltip: 'Re-telecharger',
+                icon: const Icon(Icons.download_rounded,
+                    color: AppColors.primaryBlue),
+                onPressed: () => _quickDownloadUrl(e.afterUrl!),
+              ),
             const Icon(Icons.cloud_done, color: AppColors.primaryBlue, size: 20),
           ],
         ),
@@ -283,25 +294,90 @@ class _HistoryScreenState extends State<HistoryScreen>
     );
   }
 
-  void _openCloudDetail(CloudHistoryItem e) {
-    if (e.beforeUrl == null || e.afterUrl == null) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => Scaffold(
-          appBar: AppBar(title: const Text('Comparaison cloud')),
-          body: SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: BeforeAfterSlider(
-                before: CachedNetworkImageProvider(e.beforeUrl!),
-                after: CachedNetworkImageProvider(e.afterUrl!),
-              ),
-            ),
+  Future<void> _quickDownloadUrl(String url) async {
+    _snack('Telechargement en cours...');
+    try {
+      final resp = await http.get(Uri.parse(url))
+          .timeout(const Duration(seconds: 30));
+      if (resp.statusCode != 200) {
+        _snack('Echec telechargement (HTTP ${resp.statusCode})');
+        return;
+      }
+      final result = await ImageGallerySaverPlus.saveImage(
+        resp.bodyBytes,
+        quality: 95,
+        name: 'souvenir_${DateTime.now().millisecondsSinceEpoch}',
+      );
+      final ok = (result is Map && result['isSuccess'] == true);
+      _snack(ok ? 'Photo enregistree dans la galerie' : 'Echec enregistrement');
+    } catch (e) {
+      _snack('Erreur : $e');
+    }
+  }
+
+  Future<void> _quickDownloadFile(String path) async {
+    try {
+      final bytes = await File(path).readAsBytes();
+      final result = await ImageGallerySaverPlus.saveImage(
+        bytes,
+        quality: 95,
+        name: 'souvenir_${DateTime.now().millisecondsSinceEpoch}',
+      );
+      final ok = (result is Map && result['isSuccess'] == true);
+      _snack(ok ? 'Photo enregistree dans la galerie' : 'Echec enregistrement');
+    } catch (e) {
+      _snack('Erreur : $e');
+    }
+  }
+
+  void _snack(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(m), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  Future<void> _openCloudDetail(CloudHistoryItem e) async {
+    if (e.beforeUrl == null || e.afterUrl == null) {
+      _snack('Images indisponibles');
+      return;
+    }
+    // Affiche un loader pendant le download
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+    try {
+      final tmp = await getTemporaryDirectory();
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final beforeResp = await http.get(Uri.parse(e.beforeUrl!))
+          .timeout(const Duration(seconds: 30));
+      final afterResp = await http.get(Uri.parse(e.afterUrl!))
+          .timeout(const Duration(seconds: 30));
+      if (beforeResp.statusCode != 200 || afterResp.statusCode != 200) {
+        if (mounted) Navigator.pop(context);
+        _snack('Echec telechargement images');
+        return;
+      }
+      final beforeFile = File(p.join(tmp.path, 'cloud_before_$ts.jpg'));
+      await beforeFile.writeAsBytes(beforeResp.bodyBytes);
+      if (!mounted) return;
+      Navigator.pop(context); // close loader
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ResultScreen(
+            beforeFile: beforeFile,
+            afterBytes: afterResp.bodyBytes,
+            processingMs: e.processingMs ?? 0,
           ),
         ),
-      ),
-    );
+      );
+    } catch (err) {
+      if (mounted) Navigator.pop(context);
+      _snack('Erreur : $err');
+    }
   }
 
   Widget _localTile(HistoryEntry e) {
@@ -357,10 +433,16 @@ class _HistoryScreenState extends State<HistoryScreen>
                   Text(df.format(e.createdAt),
                       style: const TextStyle(fontWeight: FontWeight.w600)),
                   const SizedBox(height: 4),
-                  const Text('Touchez pour comparer',
+                  const Text('Touchez pour comparer / partager',
                       style: TextStyle(color: AppColors.textMuted, fontSize: 12)),
                 ],
               ),
+            ),
+            IconButton(
+              tooltip: 'Re-telecharger',
+              icon: const Icon(Icons.download_rounded,
+                  color: AppColors.primaryBlue),
+              onPressed: () => _quickDownloadFile(e.afterPath),
             ),
             const Icon(Icons.chevron_right, color: AppColors.textMuted),
           ],
@@ -369,24 +451,23 @@ class _HistoryScreenState extends State<HistoryScreen>
     );
   }
 
-  void _openDetail(HistoryEntry e) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => Scaffold(
-          appBar: AppBar(title: const Text('Comparaison')),
-          body: SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: BeforeAfterSlider(
-                before: FileImage(File(e.beforePath)),
-                after: FileImage(File(e.afterPath)),
-              ),
-            ),
+  Future<void> _openDetail(HistoryEntry e) async {
+    try {
+      final afterBytes = await File(e.afterPath).readAsBytes();
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ResultScreen(
+            beforeFile: File(e.beforePath),
+            afterBytes: afterBytes,
+            processingMs: 0, // historique : pas de timing
           ),
         ),
-      ),
-    );
+      );
+    } catch (err) {
+      _snack('Impossible d\'ouvrir : $err');
+    }
   }
 }
 
