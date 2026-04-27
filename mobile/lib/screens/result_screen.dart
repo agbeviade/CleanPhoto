@@ -31,10 +31,27 @@ class ResultScreen extends StatefulWidget {
 
 class _ResultScreenState extends State<ResultScreen> {
   bool _saving = false;
+  bool _sharing = false;
 
-  Uint8List get _afterUint8 => Uint8List.fromList(widget.afterBytes);
+  /// CACHE : on lit le fichier beforeFile UNE seule fois (initState)
+  /// au lieu de readAsBytesSync() dans build() qui causait des flashs
+  /// d'image a chaque setState (re-IO disque).
+  late final Uint8List _beforeBytes;
+  late final Uint8List _afterUint8;
+
+  /// True quand une operation longue est en cours (download/share).
+  /// Bloque les autres boutons + affiche l'overlay.
+  bool get _busy => _saving || _sharing;
+
+  @override
+  void initState() {
+    super.initState();
+    _beforeBytes = widget.beforeFile.readAsBytesSync();
+    _afterUint8 = Uint8List.fromList(widget.afterBytes);
+  }
 
   Future<void> _download() async {
+    if (_busy) return;
     setState(() => _saving = true);
     try {
       final result = await ImageGallerySaverPlus.saveImage(
@@ -52,6 +69,8 @@ class _ResultScreenState extends State<ResultScreen> {
   }
 
   Future<void> _share() async {
+    if (_busy) return;
+    setState(() => _sharing = true);
     try {
       final tmp = await getTemporaryDirectory();
       final path = p.join(tmp.path,
@@ -70,6 +89,8 @@ class _ResultScreenState extends State<ResultScreen> {
       );
     } catch (e) {
       _snack('Erreur partage : $e');
+    } finally {
+      if (mounted) setState(() => _sharing = false);
     }
   }
 
@@ -135,16 +156,23 @@ class _ResultScreenState extends State<ResultScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final beforeBytes = widget.beforeFile.readAsBytesSync();
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Resultat',
-            style: TextStyle(fontWeight: FontWeight.w700)),
-      ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-          child: Column(
+    return PopScope(
+      // Bloque le back pendant download/share
+      canPop: !_busy,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Resultat',
+              style: TextStyle(fontWeight: FontWeight.w700)),
+          leading: _busy ? const SizedBox.shrink() : null,
+        ),
+        body: Stack(
+          children: [
+            AbsorbPointer(
+              absorbing: _busy,
+              child: SafeArea(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+                  child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Wrap(
@@ -190,15 +218,17 @@ class _ResultScreenState extends State<ResultScreen> {
               ),
               const SizedBox(height: 12),
               BeforeAfterSlider.fromBytes(
-                beforeBytes: beforeBytes,
+                beforeBytes: _beforeBytes,
                 afterBytes: _afterUint8,
               ),
               const SizedBox(height: 24),
               Row(
                 children: [
                   Expanded(
+                    // Bouton garde TOUJOURS le meme look : pas de spinner inline,
+                    // l'overlay s'occupe de l'indicateur de chargement.
                     child: OutlinedButton.icon(
-                      onPressed: _share,
+                      onPressed: _busy ? null : _share,
                       icon: const Icon(Icons.share_outlined),
                       label: const Text('Partager'),
                     ),
@@ -206,27 +236,74 @@ class _ResultScreenState extends State<ResultScreen> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: ElevatedButton.icon(
-                      onPressed: _saving ? null : _download,
-                      icon: _saving
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 2, color: Colors.white))
-                          : const Icon(Icons.download_rounded),
-                      label: Text(_saving ? 'Enregistrement...' : 'Telecharger'),
+                      onPressed: _busy ? null : _download,
+                      style: ElevatedButton.styleFrom(
+                        // Couleurs identiques en disabled : pas de flash visuel
+                        disabledBackgroundColor: AppColors.primaryBlue,
+                        disabledForegroundColor: Colors.white,
+                      ),
+                      icon: const Icon(Icons.download_rounded),
+                      label: const Text('Telecharger'),
                     ),
                   ),
                 ],
               ),
               const SizedBox(height: 16),
               TextButton.icon(
-                onPressed: () => Navigator.pop(context),
+                onPressed: _busy ? null : () => Navigator.pop(context),
                 icon: const Icon(Icons.refresh),
                 label: const Text('Restaurer une autre photo'),
                 style: TextButton.styleFrom(foregroundColor: AppColors.primaryBlue),
               ),
-            ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            // Overlay qui fige l'ecran pendant download/share
+            if (_busy) const _ResultOverlay(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Overlay semi-transparent qui bloque toute interaction et fige le ResultScreen
+/// pendant un download ou un partage. Utilise const pour zero rebuild.
+class _ResultOverlay extends StatelessWidget {
+  const _ResultOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Positioned.fill(
+      child: ColoredBox(
+        color: Color(0x66000000),
+        child: Center(
+          child: Card(
+            elevation: 8,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.all(Radius.circular(16)),
+            ),
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: CircularProgressIndicator(strokeWidth: 3),
+                  ),
+                  SizedBox(height: 16),
+                  Text(
+                    'Patientez...',
+                    style: TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
