@@ -31,6 +31,7 @@ from ._services.watermark import add_watermark
 from ._services.auth_service import AuthService
 from ._services.geniuspay_client import GeniusPayClient
 from ._services.notifier import CriticalNotifier
+from ._services.apple_iap import AppleIapVerifier, AppleIapError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("souvenir")
@@ -55,6 +56,7 @@ quota_service = QuotaService(supabase)
 auth_service = AuthService.from_env()
 geniuspay = GeniusPayClient.from_env()
 notifier = CriticalNotifier.from_env()
+apple_iap = AppleIapVerifier.from_env()
 # Sentry (opt-in via env). Aucun cout si SENTRY_DSN non defini.
 _sentry_dsn = os.getenv("SENTRY_DSN")
 if _sentry_dsn:
@@ -641,6 +643,156 @@ async def payments_webhook(request: Request):
 
     # Event inconnu : on accuse reception sans rien faire
     return {"status": "ignored", "event": event}
+
+
+@app.post("/api/payments/apple/verify")
+async def apple_verify(request: Request):
+    """Verifie un receipt Apple StoreKit et active le pack premium.
+
+    Body JSON attendu :
+      {
+        "receipt_data": "<base64 receipt>",      # OBLIGATOIRE
+        "product_id":   "pack_10_ios"            # OPTIONNEL (double-check)
+      }
+
+    Headers :
+      X-Device-Id              : recommande (sinon Authorization Bearer)
+      Authorization: Bearer ...: optionnel (mode connecte)
+
+    Securite :
+      - Validation cote serveur uniquement (le client peut forger un receipt)
+      - Idempotency par transaction_id Apple (un meme receipt n'active qu'une fois)
+      - Auto-fallback sandbox si Apple le demande
+    """
+    if not apple_iap.is_configured:
+        raise HTTPException(status_code=503, detail="Apple IAP desactive")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON invalide")
+
+    receipt_data = (body or {}).get("receipt_data") or ""
+    claimed_product = (body or {}).get("product_id") or ""
+    if not receipt_data:
+        raise HTTPException(status_code=400, detail="receipt_data manquant")
+
+    device_id = _device_id(request)
+    user_id = _user_id(request)
+    if not device_id and not user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Device-Id ou Authorization Bearer requis",
+        )
+
+    # 1) Verification du receipt aupres d'Apple
+    try:
+        info = apple_iap.verify(receipt_data)
+    except AppleIapError as exc:
+        log.warning("Apple verify rejected: %s (apple_status=%s)",
+                    exc, exc.apple_status)
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+
+    product_id = info["product_id"]
+    pack_id = info["pack_id"]
+    transaction_id = info["transaction_id"]
+    env = info["environment"]
+
+    # 2) Double-check : le product_id annonce par le client doit matcher
+    if claimed_product and claimed_product != product_id:
+        log.warning("Apple product_id mismatch: client=%s receipt=%s",
+                    claimed_product, product_id)
+        raise HTTPException(
+            status_code=400,
+            detail="Mismatch product_id receipt vs client",
+        )
+
+    # 3) Idempotency : reference unique = "apple_<transaction_id>"
+    reference = f"apple_{transaction_id}"
+    existing = supabase.get_payment_by_reference(reference) if supabase.is_configured else None
+    if existing and existing.get("status") == "completed":
+        return {
+            "status": "already_processed",
+            "plan": existing.get("plan"),
+            "reference": reference,
+        }
+
+    # 4) Recupere config du pack
+    pack = PACK_CATALOG.get(pack_id)
+    if not pack:
+        log.error("pack_id mappe inconnu dans catalogue: %s", pack_id)
+        raise HTTPException(status_code=500, detail="Configuration pack invalide")
+
+    pack_size = int(pack.get("images", 10))
+    days = int(pack.get("days", 7))
+    from datetime import datetime, timedelta, timezone
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+
+    # 5) Insert payment row (idempotent via reference unique)
+    if supabase.is_configured:
+        supabase.insert_payment(
+            reference=reference,
+            amount=0,  # montant en F CFA non applicable, paye en USD via Apple
+            plan=pack_id,
+            device_id=device_id,
+            user_id=user_id,
+            currency="USD",
+            provider="apple",
+            checkout_url=None,
+            raw_response={
+                "apple_product_id": product_id,
+                "transaction_id": transaction_id,
+                "original_transaction_id": info.get("original_transaction_id"),
+                "purchase_date_ms": info.get("purchase_date_ms"),
+                "environment": env,
+            },
+        )
+
+    # 6) Active premium
+    ok = False
+    if user_id:
+        ok = supabase.set_premium_user(
+            user_id=user_id, plan=pack_id, expires_at=expires_at,
+            provider="apple", receipt=reference, pack_size=pack_size,
+        )
+    elif device_id:
+        ok = supabase.set_premium_device(
+            device_id=device_id, plan=pack_id, expires_at=expires_at,
+            provider="apple", receipt=reference, pack_size=pack_size,
+        )
+
+    # 7) Marque payment completed
+    if supabase.is_configured:
+        supabase.update_payment_status(
+            reference=reference,
+            status="completed" if ok else "completed_no_target",
+            completed=True,
+        )
+
+    # 8) Notification (pas de dedupe : chaque vente compte)
+    if ok:
+        notifier.alert(
+            f"Nouveau paiement Apple ({env})",
+            f"Pack `{pack_id}` active pour {pack_size} photos.",
+            level="info",
+            context={
+                "reference": reference,
+                "plan": pack_id,
+                "scope": "user" if user_id else "device",
+                "environment": env,
+            },
+            dedupe=False,
+        )
+
+    return {
+        "status": "ok",
+        "plan": pack_id,
+        "pack_size": pack_size,
+        "expires_at": expires_at,
+        "premium_activated": ok,
+        "reference": reference,
+        "environment": env,
+    }
 
 
 @app.get("/api/me")
