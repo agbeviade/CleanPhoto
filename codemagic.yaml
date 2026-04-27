@@ -123,13 +123,12 @@ workflows:
           # Certains plugins (flutter_secure_storage, image_picker) exigent iOS 13+
           sed -i.bak -E "s/^# platform :ios, '.*'/platform :ios, '13.0'/" Podfile || true
           sed -i.bak -E "s/^platform :ios, '.*'/platform :ios, '13.0'/" Podfile || true
-          # Si la ligne n'existe pas du tout, l'ajouter
-          if ! grep -q "platform :ios" Podfile; then
-            sed -i.bak "1i\\
-platform :ios, '13.0'
-" Podfile
+          # Fallback : prepend si la ligne n'existe pas du tout
+          if ! grep -q "^platform :ios" Podfile; then
+            printf "platform :ios, '13.0'\n%s" "$(cat Podfile)" > Podfile.new
+            mv Podfile.new Podfile
           fi
-          cat Podfile | head -5
+          head -5 Podfile
 
       - name: Get Flutter dependencies
         working_directory: mobile
@@ -209,10 +208,9 @@ platform :ios, '13.0'
         script: |
           sed -i.bak -E "s/^# platform :ios, '.*'/platform :ios, '13.0'/" Podfile || true
           sed -i.bak -E "s/^platform :ios, '.*'/platform :ios, '13.0'/" Podfile || true
-          if ! grep -q "platform :ios" Podfile; then
-            sed -i.bak "1i\\
-platform :ios, '13.0'
-" Podfile
+          if ! grep -q "^platform :ios" Podfile; then
+            printf "platform :ios, '13.0'\n%s" "$(cat Podfile)" > Podfile.new
+            mv Podfile.new Podfile
           fi
 
       - name: Get Flutter dependencies
