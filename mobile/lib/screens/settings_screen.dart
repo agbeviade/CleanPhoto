@@ -4,6 +4,7 @@ import '../theme.dart';
 import '../services/settings_service.dart';
 import '../services/premium_service.dart';
 import '../services/device_service.dart';
+import '../services/notification_service.dart';
 import 'premium_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -18,6 +19,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _isPremium = false;
   bool _loading = true;
   String _deviceId = '';
+  bool _notifEnabled = true;
 
   @override
   void initState() {
@@ -29,13 +31,51 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final s = await SettingsService.load();
     final p = await PremiumService.isPremium();
     final id = await DeviceService.getId();
+    final notif = await NotificationService.isEnabled();
     if (!mounted) return;
     setState(() {
       _settings = s;
       _isPremium = p;
       _deviceId = id;
+      _notifEnabled = notif;
       _loading = false;
     });
+  }
+
+  Future<void> _toggleNotif(bool v) async {
+    if (v) {
+      // On demande la permission AVANT d'activer
+      final granted = await NotificationService.instance.requestPermissions();
+      if (!granted) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'Permission refusee. Activez les notifications dans les reglages systeme.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
+    }
+    await NotificationService.instance.setEnabled(v);
+    if (!mounted) return;
+    setState(() => _notifEnabled = v);
+  }
+
+  Future<void> _testNotif() async {
+    final granted = await NotificationService.instance.requestPermissions();
+    if (!granted) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Permission refusee.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+    await NotificationService.instance.showTest();
   }
 
   Future<void> _copyDeviceId() async {
@@ -177,6 +217,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               height: 1.4),
                         ),
                       ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _section(
+                  icon: Icons.notifications_outlined,
+                  title: 'Notifications',
+                  subtitle:
+                      'Recevez des rappels utiles : pack qui expire, quota epuise, ou suggestion de revenir.',
+                  child: Column(
+                    children: [
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Activer les notifications',
+                            style: TextStyle(
+                                fontWeight: FontWeight.w600, fontSize: 14)),
+                        subtitle: const Text(
+                            'Notifications locales uniquement (pas de push serveur).',
+                            style: TextStyle(
+                                fontSize: 11, color: AppColors.textMuted)),
+                        value: _notifEnabled,
+                        activeColor: AppColors.primaryBlue,
+                        onChanged: _toggleNotif,
+                      ),
+                      if (_notifEnabled)
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            onPressed: _testNotif,
+                            icon: const Icon(Icons.send, size: 16),
+                            label: const Text('Envoyer une notif de test'),
+                          ),
+                        ),
                     ],
                   ),
                 ),

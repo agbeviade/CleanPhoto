@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
+import 'services/notification_service.dart';
 import 'theme.dart';
 import 'screens/splash_screen.dart';
 
@@ -18,6 +19,12 @@ void main() async {
     } catch (e) {
       debugPrint('Supabase init failed: $e');
     }
+  }
+  // Init notifications locales (no-op si plateforme non supportee)
+  try {
+    await NotificationService.instance.init();
+  } catch (e) {
+    debugPrint('Notif init failed: $e');
   }
   runApp(const SouvenirApp());
 }

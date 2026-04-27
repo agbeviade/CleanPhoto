@@ -6,6 +6,7 @@ import '../theme.dart';
 import '../services/payment_service.dart';
 import '../services/premium_service.dart';
 import '../services/iap_service.dart';
+import '../services/notification_service.dart';
 
 class PremiumScreen extends StatefulWidget {
   const PremiumScreen({super.key});
@@ -389,6 +390,14 @@ class _PremiumScreenState extends State<PremiumScreen> {
       if (!context.mounted) return;
       if (result.isSuccess) {
         await PremiumService.setPremium(true);
+        // Schedule rappel 24h avant expiration (selected.days)
+        try {
+          final expiresAt = DateTime.now().add(Duration(days: selected.days));
+          await NotificationService.instance.schedulePackExpiringReminder(
+            expiresAt: expiresAt,
+            packSize: selected.images,
+          );
+        } catch (_) {}
         if (!context.mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -433,6 +442,14 @@ class _PremiumScreenState extends State<PremiumScreen> {
 
       if (completed) {
         await PremiumService.setPremium(true);
+        // Schedule rappel 24h avant expiration (selected.days)
+        try {
+          final expiresAt = DateTime.now().add(Duration(days: selected.days));
+          await NotificationService.instance.schedulePackExpiringReminder(
+            expiresAt: expiresAt,
+            packSize: selected.images,
+          );
+        } catch (_) {}
         if (!context.mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(

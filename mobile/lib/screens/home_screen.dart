@@ -11,6 +11,7 @@ import '../services/api_service.dart';
 import '../services/history_service.dart';
 import '../services/premium_service.dart';
 import '../services/auth_service.dart';
+import '../services/notification_service.dart';
 import 'result_screen.dart';
 import 'history_screen.dart';
 import 'premium_screen.dart';
@@ -175,6 +176,25 @@ class _HomeScreenState extends State<HomeScreen> {
       // Save to history (best-effort)
       try {
         await HistoryService.save(_selectedImage!, Uint8List.fromList(result.bytes));
+      } catch (_) {}
+
+      // Reset le timer de reengagement (l'utilisateur est actif)
+      try {
+        await NotificationService.instance.scheduleReengagement();
+      } catch (_) {}
+
+      // Notif si quota proche de 0 ou epuise
+      try {
+        final remaining = result.quota?.remaining ?? -1;
+        if (remaining == 0) {
+          await NotificationService.instance.showQuotaExhausted(
+            isPremium: result.isPremium,
+          );
+        } else if (remaining > 0 && remaining <= 2 && result.isPremium) {
+          // Free user a 1-2 restantes : on n'embete pas, c'est normal
+          // Premium avec pack proche d'epuisement : on l'avertit
+          await NotificationService.instance.showPackLow(remaining);
+        }
       } catch (_) {}
 
       if (!mounted) return;
