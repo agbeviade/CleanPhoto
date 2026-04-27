@@ -17,6 +17,11 @@ class RestoreResult {
   final String? pipelineMode;
   final QuotaInfo? quota;
   final bool isPremium;
+  /// Categorie detectee par le classifier (face_portrait, face_group,
+  /// landscape, document, object, unknown, user_override).
+  final String? detectedCategory;
+  /// Label UI-friendly (ex: "Portrait individuel", "Photo de groupe").
+  final String? detectedLabel;
 
   RestoreResult({
     required this.bytes,
@@ -27,6 +32,8 @@ class RestoreResult {
     this.pipelineMode,
     this.quota,
     this.isPremium = false,
+    this.detectedCategory,
+    this.detectedLabel,
   });
 }
 
@@ -187,6 +194,8 @@ class ApiService {
             ? QuotaInfo.fromJson(Map<String, dynamic>.from(body['quota']))
             : null,
         isPremium: body['is_premium'] as bool? ?? false,
+        detectedCategory: body['detected_category'] as String?,
+        detectedLabel: body['detected_label'] as String?,
       );
     }
 
@@ -207,6 +216,8 @@ class ApiService {
             )
           : null,
       isPremium: response.headers['x-premium'] == '1',
+      detectedCategory: response.headers['x-detected-category'],
+      detectedLabel: response.headers['x-detected-label'],
     );
   }
 

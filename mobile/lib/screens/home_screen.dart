@@ -185,6 +185,8 @@ class _HomeScreenState extends State<HomeScreen> {
             beforeFile: _selectedImage!,
             afterBytes: result.bytes,
             processingMs: result.processingMs,
+            detectedCategory: result.detectedCategory,
+            detectedLabel: result.detectedLabel,
           ),
         ),
       );

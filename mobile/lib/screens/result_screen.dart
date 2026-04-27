@@ -13,12 +13,16 @@ class ResultScreen extends StatefulWidget {
   final File beforeFile;
   final List<int> afterBytes;
   final int processingMs;
+  final String? detectedCategory;
+  final String? detectedLabel;
 
   const ResultScreen({
     super.key,
     required this.beforeFile,
     required this.afterBytes,
     required this.processingMs,
+    this.detectedCategory,
+    this.detectedLabel,
   });
 
   @override
@@ -69,6 +73,60 @@ class _ResultScreenState extends State<ResultScreen> {
     }
   }
 
+  /// Retourne un badge "Optimise pour : <label>" si le classifier a detecte
+  /// quelque chose d'autre que 'unknown' ou 'user_override'.
+  Widget? _categoryBadge() {
+    final cat = widget.detectedCategory;
+    final label = widget.detectedLabel;
+    if (label == null || label.isEmpty) return null;
+    if (cat == 'unknown' || cat == 'user_override') return null;
+
+    // Icone par categorie
+    IconData icon;
+    switch (cat) {
+      case 'face_portrait':
+        icon = Icons.person_outline;
+        break;
+      case 'face_group':
+        icon = Icons.groups_outlined;
+        break;
+      case 'landscape':
+        icon = Icons.landscape_outlined;
+        break;
+      case 'document':
+        icon = Icons.description_outlined;
+        break;
+      case 'object':
+        icon = Icons.image_outlined;
+        break;
+      default:
+        icon = Icons.auto_awesome_outlined;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEDE9FE), // mauve doux
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFA78BFA), width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: const Color(0xFF6D28D9), size: 16),
+          const SizedBox(width: 6),
+          Text(
+            'Optimise pour : $label',
+            style: const TextStyle(
+                color: Color(0xFF6D28D9),
+                fontWeight: FontWeight.w600,
+                fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _snack(String m) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(m), behavior: SnackBarBehavior.floating),
@@ -89,27 +147,36 @@ class _ResultScreenState extends State<ResultScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  color: AppColors.softBlue.withOpacity(0.5),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.auto_awesome,
-                        color: AppColors.primaryBlue, size: 16),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Restauration en ${(widget.processingMs / 1000).toStringAsFixed(1)} s',
-                      style: const TextStyle(
-                          color: AppColors.primaryBlue,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.center,
+                children: [
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: AppColors.softBlue.withOpacity(0.5),
+                      borderRadius: BorderRadius.circular(10),
                     ),
-                  ],
-                ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.auto_awesome,
+                            color: AppColors.primaryBlue, size: 16),
+                        const SizedBox(width: 6),
+                        Text(
+                          'Restauration en ${(widget.processingMs / 1000).toStringAsFixed(1)} s',
+                          style: const TextStyle(
+                              color: AppColors.primaryBlue,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (_categoryBadge() != null) _categoryBadge()!,
+                ],
               ),
               const SizedBox(height: 14),
               const Text(
