@@ -79,6 +79,10 @@ class _PremiumScreenState extends State<PremiumScreen> {
       // Fetch echoue : on garde les defauts deja affiches
       return;
     }
+    // ANTI-FLICKER : si la liste serveur est identique (id+price+images),
+    // on ne fait PAS de setState (evite un rebuild inutile).
+    if (_plansEqual(_plans, list)) return;
+
     // On preserve la selection si l'id existe encore dans la nouvelle liste
     final preservedId = list.any((p) => p.id == _selectedPlanId)
         ? _selectedPlanId
@@ -90,6 +94,21 @@ class _PremiumScreenState extends State<PremiumScreen> {
       _plans = list;
       _selectedPlanId = preservedId;
     });
+  }
+
+  /// Compare deux listes de packs par id + price + images + days.
+  /// Si tout matche, on considere les listes egales (pas de rebuild requis).
+  bool _plansEqual(List<PackPlan> a, List<PackPlan> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i].id != b[i].id ||
+          a[i].price != b[i].price ||
+          a[i].images != b[i].images ||
+          a[i].days != b[i].days) {
+        return false;
+      }
+    }
+    return true;
   }
 
   PackPlan? get _selectedPlan {
@@ -125,15 +144,26 @@ class _PremiumScreenState extends State<PremiumScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Choisissez votre pack',
-            style: TextStyle(fontWeight: FontWeight.w700)),
-      ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-          child: Column(
+    return PopScope(
+      // Bloque le bouton back pendant un paiement en cours
+      canPop: !_processing,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Choisissez votre pack',
+              style: TextStyle(fontWeight: FontWeight.w700)),
+          leading: _processing
+              ? const SizedBox.shrink()
+              : null, // back par defaut
+        ),
+        body: Stack(
+          children: [
+            // Contenu principal, FIGE quand _processing via AbsorbPointer
+            AbsorbPointer(
+              absorbing: _processing,
+              child: SafeArea(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+                  child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Container(
@@ -245,25 +275,21 @@ class _PremiumScreenState extends State<PremiumScreen> {
               if (!_loadingPlans && _loadError == null && _selectedPlan != null) ...[
                 const SizedBox(height: 12),
                 ElevatedButton(
+                  // Le bouton garde TOUJOURS le meme texte (pas de spinner inline).
+                  // L'overlay _ProcessingOverlay prend le relais visuellement,
+                  // ce qui evite tout clignotement du bouton.
                   onPressed: _processing ? null : () => _startPayment(context),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.accentRed,
+                    disabledBackgroundColor: AppColors.accentRed,
+                    disabledForegroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 18),
                   ),
-                  child: _processing
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.5,
-                            color: Colors.white,
-                          ),
-                        )
-                      : Text(
-                          'Payer ${_displayPrice(_selectedPlan!)}',
-                          style: const TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.w700),
-                        ),
+                  child: Text(
+                    'Payer ${_displayPrice(_selectedPlan!)}',
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w700),
+                  ),
                 ),
               ],
               const SizedBox(height: 8),
@@ -289,8 +315,15 @@ class _PremiumScreenState extends State<PremiumScreen> {
                   ),
                 ),
               ],
-            ],
-          ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            // Overlay modal pendant processing : ecran fige + spinner centre
+            if (_processing)
+              const _ProcessingOverlay(),
+          ],
         ),
       ),
     );
@@ -561,6 +594,51 @@ class _PremiumScreenState extends State<PremiumScreen> {
                     color: AppColors.textMuted,
                     fontFamily: 'monospace')),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Overlay semi-transparent qui bloque toute interaction et fige l'ecran
+/// pendant qu'un paiement est en cours d'initiation.
+///
+/// Utilise un widget separe (const) pour eviter les rebuilds inutiles
+/// du subtree principal.
+class _ProcessingOverlay extends StatelessWidget {
+  const _ProcessingOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: ColoredBox(
+        color: Color(0x66000000),
+        child: Center(
+          child: Card(
+            elevation: 8,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.all(Radius.circular(16)),
+            ),
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: CircularProgressIndicator(strokeWidth: 3),
+                  ),
+                  SizedBox(height: 16),
+                  Text(
+                    'Initialisation...',
+                    style: TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
