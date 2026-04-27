@@ -1,7 +1,11 @@
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:in_app_purchase/in_app_purchase.dart';
 import '../theme.dart';
 import '../services/payment_service.dart';
 import '../services/premium_service.dart';
+import '../services/iap_service.dart';
 
 class PremiumScreen extends StatefulWidget {
   const PremiumScreen({super.key});
@@ -16,6 +20,17 @@ class _PremiumScreenState extends State<PremiumScreen> {
   List<PackPlan> _plans = [];
   String? _selectedPlanId;
   String? _loadError;
+  // Sur iOS : map productId Apple -> ProductDetails (prix USD)
+  Map<String, ProductDetails> _appleProducts = {};
+
+  bool get _isIos => !kIsWeb && Platform.isIOS;
+
+  /// Mapping pack_id catalog -> productId Apple StoreKit.
+  static const Map<String, String> _planToAppleProduct = {
+    'pack_10_week': 'pack_10_ios',
+    'pack_50_week': 'pack_50_ios',
+    'pack_100_week': 'pack_100_ios',
+  };
 
   static const _features = [
     ('Sans filigrane sur vos photos', Icons.water_drop_outlined),
@@ -29,6 +44,14 @@ class _PremiumScreenState extends State<PremiumScreen> {
   void initState() {
     super.initState();
     _loadPlans();
+    if (_isIos) _initIap();
+  }
+
+  Future<void> _initIap() async {
+    await IapService.instance.init();
+    final products = await IapService.instance.fetchProducts();
+    if (!mounted) return;
+    setState(() => _appleProducts = products);
   }
 
   Future<void> _loadPlans() async {
@@ -74,6 +97,18 @@ class _PremiumScreenState extends State<PremiumScreen> {
       buf.write(s[i]);
     }
     return '${buf.toString()} F CFA';
+  }
+
+  /// Sur iOS : retourne le prix Apple formate (ex: "$2.99").
+  /// Sur Android : retourne le prix XOF formate.
+  String _displayPrice(PackPlan plan) {
+    if (_isIos) {
+      final appleId = _planToAppleProduct[plan.id];
+      final apple = appleId != null ? _appleProducts[appleId] : null;
+      if (apple != null) return apple.price;
+      return '...';  // pas encore charge
+    }
+    return _formatPrice(plan.price);
   }
 
   @override
@@ -213,7 +248,7 @@ class _PremiumScreenState extends State<PremiumScreen> {
                           ),
                         )
                       : Text(
-                          'Payer ${_formatPrice(_selectedPlan!.price)}',
+                          'Payer ${_displayPrice(_selectedPlan!)}',
                           style: const TextStyle(
                               fontSize: 16, fontWeight: FontWeight.w700),
                         ),
@@ -222,7 +257,9 @@ class _PremiumScreenState extends State<PremiumScreen> {
               const SizedBox(height: 8),
               Center(
                 child: Text(
-                  'Paiement securise via GeniusPay\nWave - Orange Money - MTN - Cartes bancaires',
+                  _isIos
+                      ? 'Paiement securise via Apple App Store'
+                      : 'Paiement securise via GeniusPay\nWave - Orange Money - MTN - Cartes bancaires',
                   style: TextStyle(
                       color: AppColors.textMuted.withOpacity(0.8),
                       fontSize: 11,
@@ -230,6 +267,16 @@ class _PremiumScreenState extends State<PremiumScreen> {
                   textAlign: TextAlign.center,
                 ),
               ),
+              if (_isIos) ...[
+                const SizedBox(height: 4),
+                Center(
+                  child: TextButton(
+                    onPressed: _processing ? null : _restorePurchases,
+                    child: const Text('Restaurer mes achats',
+                        style: TextStyle(fontSize: 12)),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -287,7 +334,7 @@ class _PremiumScreenState extends State<PremiumScreen> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text(_formatPrice(plan.price),
+                    Text(_displayPrice(plan),
                         style: const TextStyle(
                             fontSize: 22,
                             fontWeight: FontWeight.w800,
@@ -298,7 +345,10 @@ class _PremiumScreenState extends State<PremiumScreen> {
                   ],
                 ),
                 const SizedBox(height: 2),
-                Text('Soit ~ $pricePerImageStr F CFA / photo',
+                Text(
+                    _isIos
+                        ? '${plan.images} photos pour 7 jours'
+                        : 'Soit ~ $pricePerImageStr F CFA / photo',
                     style: const TextStyle(
                         fontSize: 11, color: AppColors.textMuted)),
               ],
@@ -318,6 +368,51 @@ class _PremiumScreenState extends State<PremiumScreen> {
   Future<void> _startPayment(BuildContext context) async {
     final selected = _selectedPlan;
     if (selected == null) return;
+    if (_isIos) {
+      await _startApplePayment(context, selected);
+    } else {
+      await _startGeniusPayment(context, selected);
+    }
+  }
+
+  /// Flow Apple StoreKit (iOS uniquement).
+  Future<void> _startApplePayment(
+      BuildContext context, PackPlan selected) async {
+    final appleId = _planToAppleProduct[selected.id];
+    if (appleId == null) {
+      _snack('Pack non disponible sur iOS');
+      return;
+    }
+    setState(() => _processing = true);
+    try {
+      final result = await IapService.instance.buy(appleId);
+      if (!context.mounted) return;
+      if (result.isSuccess) {
+        await PremiumService.setPremium(true);
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Pack active ! Merci pour votre achat.'),
+            backgroundColor: Color(0xFF2E7D32),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        Navigator.pop(context, true);
+      } else if (result.isCanceled) {
+        // Silencieux : l'utilisateur a annule volontairement
+      } else {
+        _snack('Achat echoue : ${result.errorMessage ?? "erreur inconnue"}');
+      }
+    } catch (e) {
+      if (context.mounted) _snack('Erreur achat : $e');
+    } finally {
+      if (mounted) setState(() => _processing = false);
+    }
+  }
+
+  /// Flow GeniusPay (Android / autres).
+  Future<void> _startGeniusPayment(
+      BuildContext context, PackPlan selected) async {
     setState(() => _processing = true);
     try {
       final init = await PaymentService.createPayment(plan: selected.id);
@@ -369,6 +464,26 @@ class _PremiumScreenState extends State<PremiumScreen> {
     } finally {
       if (mounted) setState(() => _processing = false);
     }
+  }
+
+  Future<void> _restorePurchases() async {
+    setState(() => _processing = true);
+    try {
+      await IapService.instance.restorePurchases();
+      if (!mounted) return;
+      _snack('Restauration en cours... vous serez notifie si un achat est trouve.');
+    } catch (e) {
+      if (mounted) _snack('Erreur restauration : $e');
+    } finally {
+      if (mounted) setState(() => _processing = false);
+    }
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
   }
 
   void _showWaitingDialog(BuildContext context, String reference) {
